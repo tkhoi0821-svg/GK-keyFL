@@ -1,0 +1,8 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=GK KeyFL
+Comment=GK KeyFL video editor (test)
+Exec=bash -c 'cd "$(dirname "%k")" && bash test_fedora.sh; echo; read -rp "Nhan Enter de dong..." _'
+Terminal=true
+Categories=AudioVideo;Video;
