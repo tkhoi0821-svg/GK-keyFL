@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 
-for f in gk_keyfl_ui.py gk_keyfl_logo.png; do
+for f in gk_keyfl_ui.py gk_theme.py gk_settings.py gk_model.py gk_auth.py gk_pages.py gk_timeline.py gk_panels.py gk_editor.py gk_keyfl_logo.png; do
   [ -f "$f" ] || { echo "Thieu file: $f (de chung thu muc voi script nay)"; exit 1; }
 done
 
