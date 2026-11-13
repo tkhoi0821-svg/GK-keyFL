@@ -1,7 +1,7 @@
 """GK KeyFL - diem vao cua ung dung (dang nhap -> trang chu -> editor)."""
 import sys
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QApplication, QMainWindow, QStackedWidget
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 import gk_theme as theme
 from gk_model import LOGO
 from gk_auth import load_user, save_user, clear_user

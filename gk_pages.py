@@ -1,9 +1,9 @@
 """Man hinh Dang nhap + Trang chu (giu nguyen tu ban cu)."""
 import os, math, time, random, datetime
-from PyQt5.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, pyqtSignal
-from PyQt5.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QLinearGradient,
+from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, Signal
+from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QLinearGradient,
                          QPainterPath, QPolygonF, QFontDatabase, QFontMetrics, QRadialGradient, QTransform)
-from PyQt5.QtWidgets import (QWidget, QApplication)
+from PySide6.QtWidgets import (QWidget, QApplication)
 import gk_theme as theme
 from gk_theme import mk, mixc, star
 from gk_model import LOGO
@@ -84,7 +84,7 @@ SUB = "Đăng nhập để mở trình chỉnh sửa và đồng bộ dự án c
 
 
 class LoginPage(QWidget):
-    entered = pyqtSignal(str, str)
+    entered = Signal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -379,9 +379,9 @@ CARD_W, CARD_H, CARD_K = 216, 303, 216 / 324
 
 
 class HomePage(QWidget):
-    new_project = pyqtSignal(str, float)
-    open_recent = pyqtSignal(str)
-    sign_out = pyqtSignal()
+    new_project = Signal(str, float)
+    open_recent = Signal(str)
+    sign_out = Signal()
     RATIOS = [("16:9", "YouTube", 16 / 9), ("9:16", "TikTok", 9 / 16), ("1:1", "Vuông", 1.0), ("4:5", "Instagram", 4 / 5)]
     BAR = 72
 

@@ -1,21 +1,29 @@
 """Trang Editor: cac panel dock duoc (keo tha / tach cua so), Theme, Workspace luu-khoi phuc layout."""
-import os, json
-from PyQt5.QtCore import Qt, QTimer, QByteArray, pyqtSignal
-from PyQt5.QtGui import QPixmap, QColor, QKeySequence
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QLabel, QPushButton, QMenu, QStatusBar,
-                             QProgressBar, QFileDialog, QColorDialog, QInputDialog, QTabWidget, QShortcut)
+import os, json, time
+from PySide6.QtCore import Qt, QTimer, QByteArray, Signal
+from PySide6.QtGui import QPixmap, QColor, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QLabel, QPushButton, QMenu, QStatusBar,
+                             QProgressBar, QFileDialog, QColorDialog, QInputDialog, QTabWidget)
 import gk_theme as theme
 import gk_settings
+import gk_prefs as prefs
+import gk_model
+import gk_panels
 from gk_model import Layer, KINDS, PKEYS, TOTAL
 from gk_timeline import LTimeline, LayerClip, TimelinePanel, GraphPanel
-from gk_panels import (styled, make_dock, LogoTile, Avatar, StagePanel, LayerPanel, Inspector, ProjectPanel,
-                       ConsolePanel)
+from gk_panels import styled, make_dock, LogoTile, Avatar, StagePanel, LayerPanel, Inspector, ConsolePanel
+from gk_project import ProjectPanel
+from gk_assets import kind_of
+from gk_media import MediaSource, AudioEngine
+from gk_vector_ui import make_vector_dock
+from gk_matte_ui import MatteDialog
+from gk_prefs_ui import SettingsDialog
 
 DEFAULT_WS = "Mặc định"
 
 
 class EditorPage(QMainWindow):
-    home_requested = pyqtSignal()
+    home_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -23,6 +31,8 @@ class EditorPage(QMainWindow):
         self.setDockNestingEnabled(True)
         self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)
         self.playing, self.t, self.sel = False, 0.0, None
+        self._ticking = False
+        self.audio = AudioEngine()
         self._need_size = False
         self.ws_current = DEFAULT_WS
 
@@ -48,17 +58,31 @@ class EditorPage(QMainWindow):
         self.insp.color_clicked.connect(self.pick_color)
         self.insp.key_add.connect(self.add_key)
         self.insp.key_del.connect(self.del_key)
+        self.insp.matte_clicked.connect(self.open_matte)
+        self.insp.vector_clicked.connect(self.open_vector)
+        self.insp.key_nav.connect(self.key_nav)
+        self.insp.ease_chosen.connect(self.on_ease)
+        self.insp.loop_chosen.connect(self.on_loop)
 
         self.tl = LTimeline()
         self.tl.seek.connect(self.seek)
         self.tl.sc.selectionChanged.connect(self.on_clip_sel)
+        self.tl.key_picked.connect(self.seek)
+        self.tl.keys_edited.connect(self._keys_changed)
         self.tlp = TimelinePanel(self.tl)
+        self.tlp.key_add.connect(self.add_key)
+        self.tlp.key_del.connect(self.del_key)
+        self.tlp.key_prev.connect(lambda: self.key_nav(-1))
+        self.tlp.key_next.connect(lambda: self.key_nav(1))
         self.graph = GraphPanel()
         self.graph.seek.connect(self.seek)
         self.graph.edited.connect(self.on_graph_edit)
 
         self.project = ProjectPanel()
-        self.project.opened.connect(self.import_file)
+        self.project.open_asset.connect(lambda p: self.add_asset(p))
+        self.project.message.connect(self.log)
+        self.stage.asset_dropped.connect(lambda p, x, y: self.add_asset(p, x=x, y=y))
+        self.tl.asset_dropped.connect(lambda p, t: self.add_asset(p, t=t))
         self.console = ConsolePanel()
         self.console.command.connect(self.run_cmd)
 
@@ -66,15 +90,20 @@ class EditorPage(QMainWindow):
         self.panel.nxt.clicked.connect(lambda: self.seek(TOTAL))
         self.panel.play.clicked.connect(self.toggle_play)
         QShortcut(QKeySequence(Qt.Key_Space), self, activated=self.toggle_play).setContext(Qt.WidgetWithChildrenShortcut)
+        QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings).setContext(Qt.WidgetWithChildrenShortcut)
+        for key, mode in ((Qt.Key_Q, "select"), (Qt.Key_W, "move"), (Qt.Key_E, "rotate"), (Qt.Key_R, "scale")):
+            QShortcut(QKeySequence(key), self, activated=lambda m=mode: self.panel.set_mode(m)).setContext(Qt.WidgetWithChildrenShortcut)
 
         # ---------------- dock
+        self.d_vector, self.vecwin = make_vector_dock(self, self.on_vector_cut)
         self.d_layers = make_dock(self, "Lớp", self.lp, "dock_layers")
         self.d_inspector = make_dock(self, "Thuộc tính", self.insp, "dock_inspector")
         self.d_project = make_dock(self, "Assets", self.project, "dock_project")
         self.d_console = make_dock(self, "Lệnh", self.console, "dock_console")
         self.d_timeline = make_dock(self, "Timeline", self.tlp, "dock_timeline")
         self.d_graph = make_dock(self, "Đồ thị key frame", self.graph, "dock_graph")
-        self.docks = [self.d_layers, self.d_inspector, self.d_project, self.d_timeline, self.d_graph, self.d_console]
+        self.docks = [self.d_layers, self.d_inspector, self.d_project, self.d_timeline, self.d_graph, self.d_console,
+                     self.d_vector]
         self.d_layers.widget().setMinimumWidth(200)
         self.d_inspector.widget().setMinimumWidth(260)
 
@@ -89,9 +118,12 @@ class EditorPage(QMainWindow):
         self.stats.setInterval(1500)
         self.stats.timeout.connect(self.update_stats)
         self.stats.start()
+        prefs.bus.changed.connect(self.apply_prefs)
+        self.apply_prefs("*")
+        self.insp.autokey.toggled.connect(lambda v: prefs.put("autokey", bool(v)))
 
         self.apply_default_layout()
-        cur = gk_settings.get("workspace_current", DEFAULT_WS)
+        cur = gk_settings.get("workspace_current", DEFAULT_WS) if prefs.get("restore_layout") else DEFAULT_WS
         if cur != DEFAULT_WS:
             self.load_workspace(cur)
         else:
@@ -114,7 +146,7 @@ class EditorPage(QMainWindow):
 
         for name, fill in (("File", self.fill_file), ("Edit", self.fill_edit), ("View", self.fill_view),
                            ("Workspace", self.fill_workspace), ("Theme", self.fill_theme),
-                           ("Setting", stub("Tuỳ chọn (chưa có)")), ("Tool", stub("Công cụ (chưa có)")),
+                           ("Setting", self.fill_setting), ("Tool", stub("Công cụ (chưa có)")),
                            ("Plugin", stub("Plugin (chưa có)"))):
             b = QPushButton(name)
             m = QMenu(b)
@@ -167,9 +199,38 @@ class EditorPage(QMainWindow):
         a.triggered.connect(lambda _=False, f=fn: f())
         return a
 
+    def fill_setting(self, m):
+        self.act(m, "⚙  Tuỳ chọn…", self.open_settings)
+
+    def open_settings(self):
+        d = getattr(self, "_dlg", None)
+        if d is None:
+            d = self._dlg = SettingsDialog(self, self)
+        d.show()
+        d.raise_()
+        d.activateWindow()
+
+    def apply_prefs(self, key="*"):
+        a = key == "*"
+        if a or key == "gizmo_scale":
+            s = prefs.get("gizmo_scale")
+            gk_panels.ARM, gk_panels.RING = 84.0 * s, 72.0 * s
+            self.stage.update()
+        if a or key == "guides":
+            self.panel.guide_btn.setChecked(prefs.get("guides"))
+        if a or key == "fps":
+            self.timer.setInterval(max(1, int(1000 / prefs.get("fps"))))
+        if a or key == "autokey":
+            self.insp.autokey.setChecked(prefs.get("autokey"))
+        if a or key == "default_ease":
+            gk_model.DEFAULT_EASE = prefs.get("default_ease")
+        if key in ("ui_font", "*"):
+            theme.set_theme(theme.current_key())
+
     def fill_file(self, m):
         self.act(m, "Lưu dự án…", self.save_project)
         self.act(m, "Mở dự án…", self.load_project)
+        self.act(m, "Đổi thư mục Assets…", self.project.choose_root)
         m.addSeparator()
         self.act(m, "‹ Về trang chủ", self.home_requested.emit)
 
@@ -177,6 +238,9 @@ class EditorPage(QMainWindow):
         self.act(m, "✂  Cắt clip", self.tl.split)
         self.act(m, "🗑  Xoá clip", self.tl.delete)
         self.act(m, "🗑  Xoá lớp", self.delete_layer)
+        m.addSeparator()
+        self.act(m, "✂  Vector Editor (cắt ảnh)…", self.open_vector)
+        self.act(m, "◐  Tách nền…", self.open_matte)
 
     def fill_view(self, m):
         for d in self.docks:
@@ -203,6 +267,8 @@ class EditorPage(QMainWindow):
     # ================= workspace (bo cuc panel) =================
     def apply_default_layout(self):
         for d in self.docks:
+            if d is self.d_vector:
+                continue
             d.setFloating(False)
             self.removeDockWidget(d)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.d_layers)
@@ -212,9 +278,11 @@ class EditorPage(QMainWindow):
         self.tabifyDockWidget(self.d_project, self.d_console)
         self.tabifyDockWidget(self.d_timeline, self.d_graph)
         for d in self.docks:
-            d.show()
+            if d is not self.d_vector:
+                d.show()
         self.d_project.raise_()
         self.d_timeline.raise_()
+        self.d_vector.hide()
         self._need_size = True
         QTimer.singleShot(0, self._size_docks)
 
@@ -282,6 +350,7 @@ class EditorPage(QMainWindow):
         self.tl.clear()
         self.stage.layers.clear()
         self.sel = self.stage.sel = None
+        self.audio.players.clear()
 
     def new_layer(self, kn, path=None, start=None, dur=5.0):
         kind, row, col = KINDS[kn]
@@ -304,6 +373,8 @@ class EditorPage(QMainWindow):
             return
         for c in list(L.clips):
             self.tl.remove_clip(c)
+        if getattr(L, "vid", None) is not None:
+            self.audio.players.pop(id(L), None)
         self.stage.layers.remove(L)
         self.select_layer(None)
         self.rebuild_tree()
@@ -352,9 +423,13 @@ class EditorPage(QMainWindow):
         self.graph.refresh()
 
     def on_graph_edit(self):
+        self._keys_changed()
+
+    def _keys_changed(self):
         self.stage.update()
         self.sync_props()
         self.tl.viewport().update()
+        self.graph.refresh()
 
     def on_pill(self, key, v):
         if self.sel:
@@ -386,44 +461,128 @@ class EditorPage(QMainWindow):
     def add_key(self):
         L = self.sel
         if L and L.kind not in ("bg", "audio"):
-            for k in list(PKEYS) + ["op"]:
-                L.set(k, self.t, L.get(k, self.t), True)
-            self.tl.viewport().update()
-            self.graph.refresh()
+            L.add_keys(self.t)
+            self._keys_changed()
 
     def del_key(self):
+        if self.sel:
+            self.sel.del_keys_at(self.t)
+            self._keys_changed()
+
+    def key_nav(self, d):
         L = self.sel
         if not L:
             return
-        for k in list(L.kf):
-            v = L.get(k, self.t)
-            rest = [x for x in L.kf[k] if abs(x[0] - self.t) >= 0.05]
-            if rest:
-                L.kf[k] = rest
-            else:
-                L.base[k] = v
-                del L.kf[k]
+        c = [x for x in L.key_times() if (x < self.t - 0.01 if d < 0 else x > self.t + 0.01)]
+        if c:
+            self.seek(max(c) if d < 0 else min(c))
+
+    def on_ease(self, e):
+        if self.sel:
+            self.sel.set_ease_at(self.t, e)
+            self._keys_changed()
+
+    def on_loop(self, m):
+        if self.sel:
+            self.sel.set_loop_all(m)
+            self._keys_changed()
+
+    # ================= tach nen / cat vector =================
+    def open_matte(self):
+        L = self.sel
+        if not (L and L.kind == "image" and L.pix is not None and not L.pix.isNull()):
+            return
+        d = getattr(self, "_matte_dlg", None)
+        if d is None:
+            d = self._matte_dlg = MatteDialog(self)
+            d.applied.connect(lambda: (self.stage.update(), self.llist.update()))
+        d.set_layer(L)
+        d.show()
+        d.raise_()
+        d.activateWindow()
+
+    def open_vector(self):
+        L = self.sel
+        if L and L.kind == "image" and L.path and os.path.exists(L.path):
+            self.vecwin.load_image(L.path)
+        elif L and L.pix is not None and not L.pix.isNull():
+            self.vecwin.canvas.set_bg(L.pix)
+        self.d_vector.show()
+        self.d_vector.raise_()
+        self.d_vector.activateWindow()
+
+    def on_vector_cut(self, mask_qimage, path):
+        """Nhan mat na tu Vector Editor: cat vung do ra khoi anh nguon thanh 1 lop moi (vi du: cat rieng cai dau)."""
+        src = self.vecwin.canvas.bg
+        if src is None or src.isNull():
+            self.log("Chưa có ảnh nền trong Vector Editor để cắt.")
+            return
+        import numpy as np
+        from PySide6.QtGui import QImage
+        import gk_matting as M
+        base = M.qimage_to_rgba(src.toImage())
+        m = mask_qimage.convertToFormat(QImage.Format_Grayscale8)
+        ptr = m.constBits()
+        alpha = np.frombuffer(ptr, np.uint8).reshape(m.height(), m.bytesPerLine())[:, :m.width()].astype(np.float32) / 255.0
+        out = M.apply_alpha(base, alpha, multiply=True)
+        xs = np.where(alpha.max(0) > 0.02)[0]
+        ys = np.where(alpha.max(1) > 0.02)[0]
+        if len(xs) == 0 or len(ys) == 0:
+            self.log("Vùng cắt rỗng, không có gì để tách.")
+            return
+        x0, x1, y0, y1 = int(xs[0]), int(xs[-1]) + 1, int(ys[0]), int(ys[-1]) + 1
+        crop = out[y0:y1, x0:x1]
+        pm = QPixmap.fromImage(M.rgba_to_qimage(crop))
+        L = self.new_layer("Hình ảnh", path=None, start=self.t)
+        L.name = "Cắt từ " + os.path.basename(getattr(self.vecwin.canvas, "src_path", "ảnh"))
+        L.pix, L.path = pm, None
+        L.wfrac = self.sel.wfrac if self.sel else 0.3
+        self.rebuild_tree()
+        self.select_layer(L)
         self.stage.update()
-        self.tl.viewport().update()
-        self.graph.refresh()
+        self.log("Đã cắt vùng chọn thành lớp '%s'." % L.name)
 
     # ================= tep / lenh / luu =================
     def log(self, s):
         self.console.log(s)
 
-    def import_file(self, which):
-        if which == "image":
-            f, _ = QFileDialog.getOpenFileName(self, "Chọn ảnh", "", "Ảnh (*.png *.jpg *.jpeg *.bmp *.webp)")
-            kn = "Hình ảnh"
-        elif which == "video":
-            f, _ = QFileDialog.getOpenFileName(self, "Chọn video", "", "Video (*.mp4 *.mov *.mkv *.avi *.webm)")
-            kn = "Video"
-        else:
-            self.log("%s: chưa hỗ trợ." % which)
+    def make_media(self, L):
+        """Gan nguon media (ffmpeg) cho lop video / am thanh. Tra ve MediaSource hoac None."""
+        if L.kind not in ("video", "audio") or not L.path or not os.path.exists(L.path):
+            return None
+        src = MediaSource(L.path)
+        if not src.info:
+            self.log("Không đọc được '%s'. Cần ffmpeg (đóng gói kèm hoặc cài trong hệ thống)." % os.path.basename(L.path))
+            return None
+        L.vid = src
+        src.updated.connect(self.stage.update)
+        src.start()
+        return src
+
+    def add_asset(self, path, x=None, y=None, t=None):
+        """Dua 1 tep trong Assets (hoac tep tu may) len timeline thanh lop moi."""
+        path = self.project.ingest(path)
+        names = {"image": "Hình ảnh", "video": "Video", "audio": "Âm thanh"}
+        k = kind_of(path)
+        if k not in names:
+            self.log("Chưa hỗ trợ loại '%s': %s" % (k, os.path.basename(path)))
             return
-        if f:
-            self.new_layer(kn, f)
-            self.log("Đã nhập " + f + (" (video chỉ hiện khung, chưa giải mã)" if which == "video" else ""))
+        dur = 5.0
+        if k in ("video", "audio"):
+            from gk_ffmpeg import probe
+            info = probe(path)
+            if info and info["duration"] > 0:
+                dur = info["duration"]
+        L = self.new_layer(names[k], path, start=t, dur=dur)
+        if k in ("video", "audio"):
+            src = self.make_media(L)
+            if src is not None:
+                self.log("Đang tạo khung xem trước cho %s (%.1fs)…" % (os.path.basename(path), src.duration))
+        if x is not None:
+            L.base["pos0"], L.base["pos1"] = float(x), float(y)
+            self.stage.update()
+            self.sync_props()
+        self.log("Đã thêm " + os.path.basename(path))
 
     def run_cmd(self, txt):
         self.log("> " + txt)
@@ -483,8 +642,11 @@ class EditorPage(QMainWindow):
             for ld in d["layers"]:
                 L = Layer.from_dict(ld)
                 self.stage.layers.append(L)
-                for row, s, du in ld.get("clips", []):
-                    self.tl.add_layer_clip(L, row, s, du)
+                for cl in ld.get("clips", []):
+                    c = self.tl.add_layer_clip(L, cl[0], cl[1], cl[2])
+                    if len(cl) > 3:
+                        c.src_off = cl[3]
+                self.make_media(L)
             self.tl.refresh()
             self.select_layer(None)
             self.rebuild_tree()
@@ -524,15 +686,34 @@ class EditorPage(QMainWindow):
         self.panel.timelbl.setText(txt)
         self.tlp.timelbl.setText(txt)
         self.prog.setValue(int(t / TOTAL * 100))
+        if self.playing and not self._ticking:
+            self.audio.sync(self.stage.layers, t, True, force=True)
 
     def tick(self):
-        t = self.t + 0.033
+        now = time.monotonic()
+        dt = min(0.1, now - self._last)
+        self._last = now
+        t = self.t + dt
         if t >= TOTAL:
-            t = 0
+            if prefs.get("loop"):
+                t = 0.0
+            else:
+                self.seek(TOTAL)
+                self.toggle_play()
+                return
+        self._ticking = True
         self.seek(t)
+        self._ticking = False
+        self.audio.sync(self.stage.layers, self.t, True, force=(t == 0.0))
 
     def toggle_play(self):
         self.playing = not self.playing
         self.panel.play.setText("⏸" if self.playing else "▶")
         self.task.setText("Đang phát" if self.playing else "Sẵn sàng")
-        self.timer.start() if self.playing else self.timer.stop()
+        if self.playing:
+            self._last = time.monotonic()
+            self.timer.start()
+            self.audio.sync(self.stage.layers, self.t, True, force=True)
+        else:
+            self.timer.stop()
+            self.audio.stop_all()

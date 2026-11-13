@@ -1,8 +1,9 @@
 """Font + he thong Theme (doi mau ca editor) + stylesheet."""
 import os, math
-from PyQt5.QtCore import QObject, QPointF, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontDatabase, QPalette, QPolygonF
+from PySide6.QtCore import QObject, QPointF, Signal
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette, QPolygonF
 import gk_settings
+import gk_prefs as prefs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DISPLAY = FONT_COND = FONT_BODY = "Sans Serif"
@@ -94,7 +95,7 @@ _key = DEFAULT_THEME
 
 
 class _Bus(QObject):
-    changed = pyqtSignal()
+    changed = Signal()
 
 
 bus = _Bus()
@@ -114,7 +115,7 @@ def _derive(t):
 
 
 QSS = """
-* { font-family: "@FONT@"; font-size: 12px; outline: 0; }
+* { font-family: "@FONT@"; font-size: @FS@px; outline: 0; }
 QToolTip { background: @bg2@; color: @text@; border: 1px solid @line@; padding: 4px 6px; }
 QLabel { background: transparent; }
 QMainWindow, QDialog, QInputDialog { background: @bg0@; }
@@ -142,6 +143,10 @@ QMenu::separator { height: 1px; background: @line@; margin: 5px 8px; }
 #DockTitle QToolButton:hover { background: @bg3@; color: @text@; }
 QDockWidget { color: @text@; }
 #Panel { background: @bg1@; }
+#Rail { background: @bg2@; border-right: 1px solid @line@; }
+QPushButton#Tool { background: transparent; border: none; border-radius: 8px; padding: 0; min-width: 36px; max-width: 36px; min-height: 36px; max-height: 36px; }
+QPushButton#Tool:hover { background: @bg3@; }
+QPushButton#Tool:checked { background: @accent@; }
 #ViewBar { background: @bg2@; border-bottom: 1px solid @line@; }
 #ViewBarBottom { background: @bg2@; border-top: 1px solid @line@; }
 
@@ -210,6 +215,12 @@ QListWidget::item { color: @text@; border-radius: 8px; padding: 4px; }
 QListWidget::item:hover { background: @bg2@; }
 QListWidget::item:selected { background: @accent_dim@; color: @text@; }
 
+QTreeWidget { background: @bg0@; border: none; color: @text@; }
+QTreeWidget::item { padding: 4px 2px; border-radius: 6px; }
+QTreeWidget::item:hover { background: @bg2@; }
+QTreeWidget::item:selected { background: @accent_dim@; color: @text@; }
+QSplitter::handle { background: @bg0@; }
+QSplitter::handle:hover { background: @accent@; }
 QProgressBar { background: rgba(0,0,0,70); border: none; border-radius: 5px; }
 QProgressBar::chunk { background: @accent_hi@; border-radius: 5px; }
 QStatusBar { background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 @bar1@, stop:1 @bar2@); color: @on_bar@; }
@@ -244,10 +255,10 @@ def set_theme(key, app=None, save=True):
     T.clear()
     T.update(t)
     if app is None:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
     if app is not None:
-        qss = QSS.replace("@FONT@", FONT_BODY)
+        qss = QSS.replace("@FONT@", FONT_BODY).replace("@FS@", str(prefs.get("ui_font")))
         for k, v in t.items():
             if isinstance(v, str):
                 qss = qss.replace("@%s@" % k, v)

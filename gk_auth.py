@@ -2,10 +2,10 @@
 import os, json, time, secrets, threading, webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
-from PyQt5.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, pyqtSignal
-from PyQt5.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QLinearGradient,
+from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, Signal
+from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QLinearGradient,
                          QPainterPath, QPolygonF, QFontDatabase, QFontMetrics, QRadialGradient, QTransform)
-from PyQt5.QtWidgets import (QWidget, QApplication)
+from PySide6.QtWidgets import (QWidget, QApplication)
 
 
 AUTH_BASE = os.environ.get("GK_AUTH_URL", "https://graykazu.graykazuvn.workers.dev/acc/gkkeyfl")
@@ -79,8 +79,8 @@ def draw_google(p, r):
 # ------------------------------------------------------------------ dang nhap qua trinh duyet
 class AuthBridge(QObject):
     """Mo trinh duyet toi trang dang nhap cua worker, cho no goi lai http://127.0.0.1:<port>/cb."""
-    done = pyqtSignal(str, str)
-    failed = pyqtSignal(str)
+    done = Signal(str, str)
+    failed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

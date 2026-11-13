@@ -1,0 +1,174 @@
+"""Tach nen bang numpy: chroma key, xoa mau, mo/co mep, tach nen AI (onnxruntime). Ham thuan numpy; cau noi Qt o cuoi file."""
+import os
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MODEL_NAMES = ("u2netp.onnx", "u2net.onnx", "silueta.onnx", "isnet-general-use.onnx")
+
+
+# ------------------------------------------------------------------ mau
+def _cbcr(rgb):
+    f = rgb.astype(np.float32)
+    r, g, b = f[..., 0], f[..., 1], f[..., 2]
+    return (-0.1687 * r - 0.3313 * g + 0.5 * b), (0.5 * r - 0.4187 * g - 0.0813 * b)
+
+
+def chroma_alpha(rgb, key, tol=0.25, soft=0.15):
+    """Alpha (0..1) theo khoang cach mau trong mat phang CbCr (it bi anh huong boi do sang). 0 = nen, 1 = giu."""
+    kcb, kcr = _cbcr(np.array([[key]], dtype=np.uint8))
+    cb, cr = _cbcr(rgb)
+    d = np.sqrt((cb - kcb[0, 0]) ** 2 + (cr - kcr[0, 0]) ** 2) / 160.0
+    return np.clip((d - tol) / max(soft, 1e-3), 0.0, 1.0).astype(np.float32)
+
+
+def color_alpha(rgb, key, tol=0.2, soft=0.1):
+    """Alpha theo khoang cach RGB (hop voi nen trang / den / mau phang)."""
+    d = np.sqrt(((rgb.astype(np.float32) - np.array(key, dtype=np.float32)) ** 2).sum(-1)) / 441.7
+    return np.clip((d - tol) / max(soft, 1e-3), 0.0, 1.0).astype(np.float32)
+
+
+def despill(rgb, key, amount=1.0):
+    """Khu vien mau nen (xanh la / xanh duong) tran len mep vat the."""
+    out = rgb.astype(np.float32)
+    c = int(np.argmax(key))
+    others = [i for i in range(3) if i != c]
+    limit = out[..., others].mean(-1)
+    out[..., c] = np.where(out[..., c] > limit, out[..., c] * (1 - amount) + limit * amount, out[..., c])
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+# ------------------------------------------------------------------ mat na alpha
+def _max3(a):
+    p = np.pad(a, 1, mode="edge")
+    h = np.maximum(np.maximum(p[:, :-2], p[:, 1:-1]), p[:, 2:])
+    return np.maximum(np.maximum(h[:-2], h[1:-1]), h[2:])
+
+
+def grow(alpha, px):
+    """px > 0: no mep (dilate); px < 0: co mep (erode)."""
+    a = alpha
+    for _ in range(abs(int(px))):
+        a = _max3(a) if px > 0 else 1.0 - _max3(1.0 - a)
+    return a
+
+
+def _box(a, r, axis):
+    n = a.shape[axis]
+    p = np.pad(a, [(r, r) if i == axis else (0, 0) for i in range(a.ndim)], mode="edge")
+    c = np.cumsum(p, axis=axis, dtype=np.float64)
+    zero = np.zeros_like(np.take(c, [0], axis=axis))
+    c = np.concatenate([zero, c], axis=axis)
+    hi = np.take(c, range(2 * r + 1, 2 * r + 1 + n), axis=axis)
+    lo = np.take(c, range(0, n), axis=axis)
+    return ((hi - lo) / (2 * r + 1)).astype(np.float32)
+
+
+def blur(alpha, r):
+    """Lam mem mep (xap xi Gauss bang 2 lan box blur)."""
+    r = int(r)
+    if r <= 0:
+        return alpha
+    a = alpha
+    for _ in range(2):
+        a = _box(_box(a, r, 0), r, 1)
+    return a
+
+
+def refine(alpha, grow_px=0, feather=0):
+    a = grow(alpha, grow_px) if grow_px else alpha
+    return np.clip(blur(a, feather), 0.0, 1.0) if feather else a
+
+
+# ------------------------------------------------------------------ tach nen AI
+_sess = {}
+
+
+def model_dirs():
+    return [os.path.join(HERE, "models"), os.path.join(os.path.expanduser("~"), ".local", "share", "gk_keyfl", "models")]
+
+
+def find_model():
+    for d in model_dirs():
+        for n in MODEL_NAMES:
+            p = os.path.join(d, n)
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def _resize(a, w, h):
+    """Bilinear bang numpy cho mang (H, W) hoac (H, W, C)."""
+    H, W = a.shape[:2]
+    ys, xs = (np.arange(h) + 0.5) * H / h - 0.5, (np.arange(w) + 0.5) * W / w - 0.5
+    y0, x0 = np.clip(np.floor(ys).astype(int), 0, H - 1), np.clip(np.floor(xs).astype(int), 0, W - 1)
+    y1, x1 = np.clip(y0 + 1, 0, H - 1), np.clip(x0 + 1, 0, W - 1)
+    wy, wx = np.clip(ys - y0, 0, 1), np.clip(xs - x0, 0, 1)
+    if a.ndim == 3:
+        wy, wx = wy[:, None, None], wx[None, :, None]
+    else:
+        wy, wx = wy[:, None], wx[None, :]
+    f = a.astype(np.float32)
+    top = f[y0][:, x0] * (1 - wx) + f[y0][:, x1] * wx
+    bot = f[y1][:, x0] * (1 - wx) + f[y1][:, x1] * wx
+    return top * (1 - wy) + bot * wy
+
+
+def ai_available():
+    try:
+        import onnxruntime  # noqa: F401
+    except Exception:
+        return False, "Thiếu thư viện onnxruntime."
+    if find_model() is None:
+        return False, "Chưa có model AI (u2netp.onnx). Đặt vào: " + model_dirs()[0]
+    return True, ""
+
+
+def ai_alpha(rgb, model=None):
+    """Tach nen tu dong bang mang U2-Net (onnx). Tra ve alpha float32 (0..1) cung kich thuoc anh."""
+    ok, why = ai_available()
+    if not ok:
+        raise RuntimeError(why)
+    import onnxruntime as ort
+    path = model or find_model()
+    if path not in _sess:
+        _sess[path] = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    s = _sess[path]
+    inp = s.get_inputs()[0]
+    shp = inp.shape
+    size = shp[2] if len(shp) == 4 and isinstance(shp[2], int) else 320
+    H, W = rgb.shape[:2]
+    x = _resize(rgb, size, size)
+    x = x / max(float(x.max()), 1e-6)
+    x = (x - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    x = x.transpose(2, 0, 1)[None].astype(np.float32)
+    pred = s.run(None, {inp.name: x})[0]
+    pred = np.squeeze(pred)
+    if pred.ndim == 3:
+        pred = pred[0]
+    lo, hi = float(pred.min()), float(pred.max())
+    pred = (pred - lo) / ((hi - lo) or 1.0)
+    return np.clip(_resize(pred, W, H), 0.0, 1.0).astype(np.float32)
+
+
+# ------------------------------------------------------------------ cau noi QImage <-> numpy (Qt chi nap khi can)
+def qimage_to_rgba(img):
+    from PySide6.QtGui import QImage
+    img = img.convertToFormat(QImage.Format_RGBA8888)
+    w, h, bpl = img.width(), img.height(), img.bytesPerLine()
+    ptr = img.constBits()
+    return np.frombuffer(ptr, np.uint8).reshape(h, bpl)[:, :w * 4].reshape(h, w, 4).copy()
+
+
+def rgba_to_qimage(arr):
+    from PySide6.QtGui import QImage
+    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+    h, w = arr.shape[:2]
+    return QImage(arr.data, w, h, w * 4, QImage.Format_RGBA8888).copy()
+
+
+def apply_alpha(rgba, alpha, multiply=True):
+    """Gan alpha (float 0..1) vao anh RGBA; multiply=True thi nhan voi alpha san co."""
+    out = rgba.copy()
+    a = out[..., 3].astype(np.float32) / 255.0
+    out[..., 3] = np.clip((a * alpha if multiply else alpha) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    return out
