@@ -1,9 +1,9 @@
 """Trang Editor: cac panel dock duoc (keo tha / tach cua so), Theme, Workspace luu-khoi phuc layout."""
-import os, json, time
+import os, json, time, copy
 from PySide6.QtCore import Qt, QTimer, QByteArray, Signal
 from PySide6.QtGui import QPixmap, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QLabel, QPushButton, QMenu, QStatusBar,
-                             QProgressBar, QFileDialog, QColorDialog, QInputDialog, QTabWidget)
+                             QProgressBar, QFileDialog, QColorDialog, QInputDialog, QTabWidget, QApplication)
 import gk_theme as theme
 import gk_settings
 import gk_prefs as prefs
@@ -22,6 +22,7 @@ from gk_plugins import PluginHost
 import gk_recent
 import gk_dialogs
 import gk_templates
+from gk_bezier import BezierDialog
 
 DEFAULT_WS = "Mặc định"
 
@@ -40,6 +41,12 @@ class EditorPage(QMainWindow):
         self._need_size = False
         self.ws_current = DEFAULT_WS
         self.plugins = PluginHost(self)
+        self._undo, self._redo, self._clipboard = [], [], None
+        self._last_key, self._last_snap, self._last_change = None, None, 0.0
+        self._undo_timer = QTimer(self)
+        self._undo_timer.setInterval(250)
+        self._undo_timer.timeout.connect(self._undo_poll)
+        self._undo_timer.start()
 
         # ---------------- panel
         self.panel = StagePanel(self)
@@ -94,10 +101,7 @@ class EditorPage(QMainWindow):
         self.panel.prev.clicked.connect(lambda: self.seek(0))
         self.panel.nxt.clicked.connect(lambda: self.seek(TOTAL))
         self.panel.play.clicked.connect(self.toggle_play)
-        QShortcut(QKeySequence(Qt.Key_Space), self, activated=self.toggle_play).setContext(Qt.WidgetWithChildrenShortcut)
-        QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings).setContext(Qt.WidgetWithChildrenShortcut)
-        for key, mode in ((Qt.Key_Q, "select"), (Qt.Key_W, "move"), (Qt.Key_E, "rotate"), (Qt.Key_R, "scale")):
-            QShortcut(QKeySequence(key), self, activated=lambda m=mode: self.panel.set_mode(m)).setContext(Qt.WidgetWithChildrenShortcut)
+        self.setup_shortcuts()
 
         # ---------------- dock
         self.d_vector, self.vecwin = make_vector_dock(self, self.on_vector_cut)
@@ -136,6 +140,43 @@ class EditorPage(QMainWindow):
         theme.bus.changed.connect(self.update_chips)
         self.reset_project(16 / 9)
         self.plugins.load_all()
+
+    # ================= phim tat =================
+    def setup_shortcuts(self):
+        """Phim tat cua editor. Dung WindowShortcut: hoat dong bat ke dang bam vao panel/canvas/timeline nao
+        (ban cu dung WidgetWithChildrenShortcut nen mat tac dung khi tieu diem nam ngoai editor).
+        O nhap lieu (console, o so, o van ban) tu giu cac phim go chu / Delete / Home / End cua no."""
+        self._shortcuts = []
+        table = [
+            ("Space", self.toggle_play, False),
+            ("Ctrl+,", self.open_settings, False),
+            ("Q", lambda: self.panel.set_mode("select"), False),
+            ("W", lambda: self.panel.set_mode("move"), False),
+            ("E", lambda: self.panel.set_mode("rotate"), False),
+            ("R", lambda: self.panel.set_mode("scale"), False),
+            ("Delete", self.delete_layer, False),
+            ("Ctrl+Z", self.undo, True),
+            ("Ctrl+Y", self.redo, True),
+            ("Ctrl+Shift+Z", self.redo, True),
+            ("Ctrl+C", self.copy_layer, False),
+            ("Ctrl+V", self.paste_layer, False),
+            ("Ctrl+D", self.duplicate_layer, False),
+            ("Ctrl+B", self.open_bezier, False),
+            ("K", self.add_key, False),
+            ("Shift+K", self.del_key, False),
+            ("Alt+Left", lambda: self.key_nav(-1), True),
+            ("Alt+Right", lambda: self.key_nav(1), True),
+            ("Home", lambda: self.seek(0), False),
+            ("End", lambda: self.seek(TOTAL), False),
+            ("Ctrl+S", self.save_project, False),
+            ("Ctrl+O", self.load_project, False),
+        ]
+        for seq, fn, rep_ok in table:
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WindowShortcut)
+            sc.setAutoRepeat(rep_ok)
+            sc.activated.connect(fn)
+            self._shortcuts.append(sc)
 
     # ================= thanh tren =================
     def build_topbar(self):
@@ -238,16 +279,23 @@ class EditorPage(QMainWindow):
             theme.set_theme(theme.current_key())
 
     def fill_file(self, m):
-        self.act(m, "Lưu dự án…", self.save_project)
-        self.act(m, "Mở dự án…", self.load_project)
+        self.act(m, "Lưu dự án…\tCtrl+S", self.save_project)
+        self.act(m, "Mở dự án…\tCtrl+O", self.load_project)
         self.act(m, "Đổi thư mục Assets…", self.project.choose_root)
         m.addSeparator()
         self.act(m, "‹ Về trang chủ", self.home_requested.emit)
 
     def fill_edit(self, m):
+        self.act(m, "↶  Hoàn tác\tCtrl+Z", self.undo, enabled=bool(self._undo))
+        self.act(m, "↷  Làm lại\tCtrl+Y", self.redo, enabled=bool(self._redo))
+        m.addSeparator()
+        ok = bool(self.sel) and self.sel.kind != "bg"
+        self.act(m, "⎘  Sao chép lớp\tCtrl+C", self.copy_layer, enabled=ok)
+        self.act(m, "📋  Dán lớp\tCtrl+V", self.paste_layer, enabled=self._clipboard is not None)
+        m.addSeparator()
         self.act(m, "✂  Cắt clip", self.tl.split)
         self.act(m, "🗑  Xoá clip", self.tl.delete)
-        self.act(m, "🗑  Xoá lớp", self.delete_layer)
+        self.act(m, "🗑  Xoá lớp\tDelete", self.delete_layer)
         m.addSeparator()
         self.act(m, "✂  Vector Editor (cắt ảnh)…", self.open_vector)
         self.act(m, "◐  Tách nền…", self.open_matte)
@@ -262,13 +310,14 @@ class EditorPage(QMainWindow):
         L = self.sel
         ok = bool(L) and L.kind != "bg"
         keyable = ok and L.kind != "audio"
-        self.act(m, "⧉  Nhân đôi lớp", self.duplicate_layer, enabled=ok)
+        self.act(m, "⧉  Nhân đôi lớp\tCtrl+D", self.duplicate_layer, enabled=ok)
         self.act(m, "⟲  Đặt lại vị trí / xoay / tỉ lệ", self.reset_transform, enabled=ok)
         m.addSeparator()
-        self.act(m, "◆  Thêm key tại vị trí hiện tại", self.add_key, enabled=keyable)
-        self.act(m, "◇  Xoá key tại vị trí hiện tại", self.del_key, enabled=bool(L))
-        self.act(m, "◀  Key trước", lambda: self.key_nav(-1), enabled=bool(L))
-        self.act(m, "▶  Key sau", lambda: self.key_nav(1), enabled=bool(L))
+        self.act(m, "◆  Thêm key tại vị trí hiện tại\tK", self.add_key, enabled=keyable)
+        self.act(m, "◇  Xoá key tại vị trí hiện tại\tShift+K", self.del_key, enabled=bool(L))
+        self.act(m, "◀  Key trước\tAlt+←", lambda: self.key_nav(-1), enabled=bool(L))
+        self.act(m, "▶  Key sau\tAlt+→", lambda: self.key_nav(1), enabled=bool(L))
+        self.act(m, "⌇  Cửa sổ Cubic Bézier…\tCtrl+B", self.open_bezier, enabled=keyable)
         sub = m.addMenu("Kiểu nội suy của key tại đây")
         sub.setEnabled(keyable)
         for k, n in gk_model.EASES:
@@ -288,19 +337,162 @@ class EditorPage(QMainWindow):
 
         self.plugins.fill_tools(m, self.act)
 
+    def _clone_layer(self, src):
+        """Tao ban sao doc lap cua lop (giu ca anh nam trong bo nho, vd lop cat tu Vector Editor)."""
+        N = Layer.from_dict(src.to_dict())
+        pix = getattr(src, "pix", None)
+        if pix is not None and not pix.isNull():
+            N.pix = QPixmap(pix)
+        if hasattr(src, "wfrac"):
+            N.wfrac = src.wfrac
+        return N
+
+    @staticmethod
+    def _clips_of(L):
+        return [(c.row, c.start, c.dur, getattr(c, "src_off", 0.0)) for c in L.clips]
+
+    def _insert_layer(self, N, clips):
+        self.stage.layers.append(N)
+        for row, s, du, off in clips:
+            c = self.tl.add_layer_clip(N, row, s, du)
+            if off and c is not None:
+                c.src_off = off
+        self.make_media(N)
+        self.tl.refresh()
+        self.select_layer(N)
+        self.rebuild_tree()
+        self.plugins.emit("layer_added", N)
+
     def duplicate_layer(self):
         L = self.sel
         if not L or L.kind == "bg":
             return
-        N = Layer.from_dict(L.to_dict())
+        N = self._clone_layer(L)
         N.name = N.name + " (bản sao)"
-        self.stage.layers.append(N)
-        for c in L.clips:
-            self.tl.add_layer_clip(N, c.row, c.start, c.dur)
-        self.tl.refresh()
-        self.select_layer(N)
-        self.rebuild_tree()
+        self._insert_layer(N, self._clips_of(L))
         self.log("Đã nhân đôi '%s'" % L.name)
+
+    def copy_layer(self):
+        L = self.sel
+        if not L or L.kind == "bg":
+            return
+        self._clipboard = (self._clone_layer(L), self._clips_of(L))
+        self.log("Đã sao chép lớp '%s'" % L.name)
+
+    def paste_layer(self):
+        if self._clipboard is None:
+            self.log("Chưa sao chép lớp nào.")
+            return
+        src, clips = self._clipboard
+        N = self._clone_layer(src)
+        if clips:                                  # dan tai vi tri con tro thoi gian
+            delta = self.t - min(c[1] for c in clips)
+            moved = []
+            for row, s, du, off in clips:
+                s2 = min(max(0.0, s + delta), TOTAL - 0.1)
+                moved.append((row, s2, max(0.1, min(du, TOTAL - s2)), off))
+            clips = moved
+        self._insert_layer(N, clips)
+        self.log("Đã dán lớp '%s'" % N.name)
+
+    # ================= hoan tac / lam lai =================
+    def _layer_snap(self, L):
+        attrs = {}
+        for k, v in L.__dict__.items():
+            if k in ("clips", "pix", "vid"):
+                continue
+            try:
+                attrs[k] = copy.deepcopy(v)
+            except Exception:
+                attrs[k] = v
+        pix = getattr(L, "pix", None)
+        pix = QPixmap(pix) if pix is not None and not pix.isNull() else None   # chia se du lieu (copy-on-write)
+        return (L, attrs, pix, self._clips_of(L))
+
+    def _take_snapshot(self):
+        return {"ratio": self.stage.ratio, "sel": self.sel,
+                "layers": [self._layer_snap(L) for L in self.stage.layers]}
+
+    def _state_key(self):
+        try:
+            def pk(L):
+                p = getattr(L, "pix", None)
+                return p.cacheKey() if p is not None and not p.isNull() else 0
+            return json.dumps([self.stage.ratio, [[L.to_dict(), pk(L)] for L in self.stage.layers]],
+                              sort_keys=True, default=str)
+        except Exception:
+            return None
+
+    def undo_reset(self):
+        """Moc ban dau: du an moi / vua mo thi xoa lich su hoan tac."""
+        self._undo, self._redo = [], []
+        self._last_key, self._last_snap, self._last_change = self._state_key(), self._take_snapshot(), 0.0
+
+    def _undo_poll(self):
+        """Cu 250ms so sanh du an voi lan truoc; thay doi lien tuc (keo chuot, go chu) gop thanh 1 buoc hoan tac."""
+        if not self.isVisible() or self._last_snap is None:
+            return
+        if QApplication.mouseButtons() & Qt.LeftButton:
+            return          # dang keo chuot: khong chup / so sanh ca du an moi 250ms (gay giat); lam sau khi tha
+        key = self._state_key()
+        if key is None or key == self._last_key:
+            return
+        now = time.monotonic()
+        if now - self._last_change > 0.6:
+            self._undo.append(self._last_snap)
+            del self._undo[:-60]
+            self._redo.clear()
+        self._last_change, self._last_key, self._last_snap = now, key, self._take_snapshot()
+
+    def undo(self):
+        self._undo_poll()
+        if not self._undo:
+            self.log("Không còn gì để hoàn tác.")
+            return
+        self._redo.append(self._take_snapshot())
+        self._restore(self._undo.pop())
+        self.log("Hoàn tác")
+
+    def redo(self):
+        self._undo_poll()
+        if not self._redo:
+            self.log("Không còn gì để làm lại.")
+            return
+        self._undo.append(self._take_snapshot())
+        self._restore(self._redo.pop())
+        self.log("Làm lại")
+
+    def _restore(self, snap):
+        keep = {id(x[0]) for x in snap["layers"]}
+        for L in list(self.stage.layers):
+            if id(L) not in keep:
+                self.audio.players.pop(id(L), None)
+        if abs(self.stage.ratio - snap["ratio"]) > 1e-6:
+            self.panel.set_ratio(snap["ratio"])
+        self.tl.clear()
+        layers = []
+        for L, attrs, pix, clips in snap["layers"]:
+            for k, v in attrs.items():
+                try:
+                    setattr(L, k, copy.deepcopy(v))
+                except Exception:
+                    setattr(L, k, v)
+            L.pix = QPixmap(pix) if pix is not None else None
+            L.clips = []
+            layers.append(L)
+        self.stage.layers[:] = layers
+        for L, attrs, pix, clips in snap["layers"]:
+            for row, s, du, off in clips:
+                c = self.tl.add_layer_clip(L, row, s, du)
+                if off and c is not None:
+                    c.src_off = off
+        self.tl.refresh()
+        self.select_layer(snap["sel"] if snap["sel"] in layers else None)
+        self.rebuild_tree()
+        self.stage.update()
+        self.graph.refresh()
+        self.seek(self.t)
+        self._last_key, self._last_snap, self._last_change = self._state_key(), self._take_snapshot(), 0.0
 
     def reset_transform(self):
         L = self.sel
@@ -421,6 +613,7 @@ class EditorPage(QMainWindow):
         self.new_layer("Hình vuông", start=0, dur=TOTAL)
         self.seek(0)
         self.plugins.emit("project_new")
+        self.undo_reset()
 
     def clear_project(self):
         self.tl.clear()
@@ -488,6 +681,7 @@ class EditorPage(QMainWindow):
         self.stage.update()
         self.graph.set_layer(L)
         self.sync_props()
+        self._bez_sync()
         self.plugins.emit("layer_selected", L)
 
     # ================= thuoc tinh / key frame =================
@@ -509,6 +703,7 @@ class EditorPage(QMainWindow):
         self.sync_props()
         self.tl.viewport().update()
         self.graph.refresh()
+        self._bez_sync()
         self.plugins.emit("keys_changed")
 
     def on_pill(self, key, v):
@@ -566,6 +761,18 @@ class EditorPage(QMainWindow):
         if self.sel:
             self.sel.set_loop_all(m)
             self._keys_changed()
+
+    def open_bezier(self):
+        d = getattr(self, "_bez_dlg", None)
+        if d is None:
+            d = self._bez_dlg = BezierDialog(self)
+            d.changed.connect(self._keys_changed)
+        d.refresh(); d.show(); d.raise_(); d.activateWindow()
+
+    def _bez_sync(self):
+        d = getattr(self, "_bez_dlg", None)
+        if d is not None and d.isVisible():
+            d.refresh()
 
     # ================= tach nen / cat vector =================
     def open_matte(self):
@@ -747,6 +954,7 @@ class EditorPage(QMainWindow):
             self.log("Đã mở " + f)
             gk_recent.add(f)
             self.plugins.emit("project_loaded", f)
+            self.undo_reset()
             return True
         except Exception as ex:
             self.log("Lỗi mở: %s" % ex)
@@ -779,6 +987,7 @@ class EditorPage(QMainWindow):
         self.stage.set_time(t)
         self.graph.set_time(t)
         self.sync_props()
+        self._bez_sync()
         txt = f"{int(t) // 60:02d}:{t % 60:04.1f} / 00:{TOTAL:04.1f}"
         self.panel.timelbl.setText(txt)
         self.tlp.timelbl.setText(txt)

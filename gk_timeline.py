@@ -1,10 +1,10 @@
 """Timeline (clip, thuoc do, playhead) + Do thi key frame."""
-from PySide6.QtCore import Qt, QRectF, QPointF, QSize, Signal
+from PySide6.QtCore import Qt, QRectF, QPointF, QSize, QTimer, Signal
 from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QFontMetrics, QPainterPath, QPolygonF, QLinearGradient,
                          QPixmap, QIcon)
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel, QComboBox, QPushButton, QSlider,
                              QGraphicsView, QGraphicsScene, QGraphicsRectItem, QFrame, QListWidget, QListWidgetItem, QMenu,
-                             QSizePolicy)
+                             QSizePolicy, QButtonGroup)
 import math
 import gk_theme as theme
 from gk_theme import T, mk
@@ -414,7 +414,7 @@ class GraphPlot(QWidget):
     edited = Signal()
     picked = Signal(object)          # key chinh (key chon cuoi) hoac None
     sel_changed = Signal()
-    ML, MR, MT, MB = 58, 22, 18, 30
+    ML, MR, MT, MB = 68, 22, 18, 30
     STEPS = (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30)
 
     def __init__(self):
@@ -424,6 +424,14 @@ class GraphPlot(QWidget):
         self.vt0, self.vt1 = 0.0, TOTAL          # khoang thoi gian dang xem
         self.vy = None                           # (thap, cao) khi nguoi dung zoom doc; None = tu dong
         self.frozen = None                       # khoa truc doc trong luc keo
+        self.mode = "value"                       # "value" = do thi gia tri · "speed" = do thi toc do
+        self._sc = None                          # cache mau toc do (xoa moi lan ve)
+        self._yr_last = None                     # truc doc vua ve: hit-test / bat dau keo dung lai, khong tinh lai
+        self._dirty, self._pick = False, None
+        self._et = QTimer(self)                  # gom cac lan sua khi keo: toi da 1 lan / khung hinh
+        self._et.setSingleShot(True)
+        self._et.setInterval(16)
+        self._et.timeout.connect(self._flush_edit)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumHeight(110)
@@ -466,6 +474,8 @@ class GraphPlot(QWidget):
         return QRectF(self.ML, self.MT, max(10, self.width() - self.ML - self.MR), max(10, self.height() - self.MT - self.MB))
 
     def yr(self):
+        if self.mode == "speed":
+            return self.spd_range()
         if self.frozen is not None:
             return self.frozen
         if self.vy is not None:
@@ -535,6 +545,131 @@ class GraphPlot(QWidget):
         self.vt1 += dt
         self.update()
 
+    # ---------------------------------------------------------------- gom su kien sua (keo muot)
+    def _queue_edit(self):
+        """Khi keo chuot, su kien den rat day. Chi bao cho phan con lai cua app (canvas, thuoc tinh, timeline, plugin)
+        toi da 1 lan moi ~16ms; do thi van ve lai ngay theo chuot."""
+        self._dirty = True
+        if not self._et.isActive():
+            self._et.start()
+
+    def _flush_edit(self):
+        self._et.stop()
+        if self._dirty:
+            self._dirty = False
+            if self._pick is not None:
+                self.picked.emit(self._pick)
+                self._pick = None
+            self.sel_changed.emit()
+            self.edited.emit()
+
+    # ---------------------------------------------------------------- do thi toc do (dao ham cua gia tri theo thoi gian)
+    def spd_h(self):
+        return max(1e-3, ((self.vt1 - self.vt0) or 1.0) / 1500.0)
+
+    def spd_at(self, t):
+        h = self.spd_h()
+        return (self.layer.get(self.key, t + h) - self.layer.get(self.key, t - h)) / (2 * h)
+
+    def spd_samples(self):
+        if self._sc is None:
+            pts, n = [], 300
+            if self.layer is not None:
+                span = (self.vt1 - self.vt0) or 1.0
+                for i in range(n + 1):
+                    t = self.vt0 + span * i / n
+                    pts.append((t, self.spd_at(t)))
+            self._sc = pts
+        return self._sc
+
+    def spd_range(self):
+        vals = [v for _, v in self.spd_samples()] or [0.0, 1.0]
+        lo, hi = min(0.0, min(vals)), max(0.0, max(vals))
+        a = sorted(abs(v) for v in vals)
+        cap = a[int(0.97 * (len(a) - 1))] * 1.6     # key "hold" tao dinh vo han: bo qua khi chon khung
+        if cap > 1e-9:
+            lo, hi = max(lo, -cap), min(hi, cap)
+        pad = (hi - lo) * 0.12 or 1.0
+        return lo - pad * 0.5, hi + pad
+
+    def _hit_speed(self, pos):
+        if not self.layer:
+            return None
+        y0 = self.px(self.vt0, 0.0, self.yr()).y()
+        for k in self.keys():
+            if abs(self.tx(k.t) - pos.x()) < 11 and abs(y0 - pos.y()) < 14:
+                return ("key", k)
+        return None
+
+    def _press_speed(self, e, pos):
+        h = self._hit_speed(pos)
+        add = bool(e.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier))
+        if h is None:
+            if not add:
+                self.set_sel([])
+            self.seek.emit(self.clampt(self.xt(pos.x())))
+            self.d = dict(m="scrub")
+            return
+        k = h[1]
+        if add and k in self.sel:
+            self.set_sel([x for x in self.sel if x is not k])
+            return
+        if add:
+            self.set_sel(self.sel + [k])
+        elif k not in self.sel:
+            self.set_sel([k])
+        self.d = dict(m="skey", x0=pos.x(), snap=[(q, q.t) for q in self.sel])
+        self.hot = h
+        self.update()
+
+    def _paint_speed(self, p, r, yr, L):
+        ks = self.keys()
+        y0 = self.px(self.vt0, 0.0, yr).y()
+        p.save()
+        p.setClipRect(r)
+        p.setPen(QPen(QColor(T["text3"]), 1, Qt.DashLine))
+        p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
+        path = QPainterPath()
+        pts = self.spd_samples()
+        for i, (tt, s) in enumerate(pts):
+            pt = self.px(tt, s, yr)
+            path.moveTo(pt) if i == 0 else path.lineTo(pt)
+        if pts:
+            area = QPainterPath(path)
+            area.lineTo(QPointF(self.tx(pts[-1][0]), y0))
+            area.lineTo(QPointF(self.tx(pts[0][0]), y0))
+            area.closeSubpath()
+            c = QColor(GREEN)
+            c.setAlpha(45)
+            p.setPen(Qt.NoPen)
+            p.setBrush(c)
+            p.drawPath(area)
+        p.setPen(QPen(QColor(GREEN), 2.6))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        p.restore()
+        for k in ks:                                   # key = vach doc + cham vang tren duong 0
+            x = self.tx(k.t)
+            if not (r.left() - 12 <= x <= r.right() + 12):
+                continue
+            sel, hot = k in self.sel, self.hot == ("key", k)
+            p.setPen(QPen(QColor(T["text3"]), 1, Qt.DotLine))
+            p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+            p.setPen(QPen(QColor("#ffffff"), 2.4) if sel else QPen(QColor("#000000"), 1))
+            p.setBrush(QColor("#ffffff") if hot else QColor(YELLOW))
+            p.drawEllipse(QPointF(x, y0), 9 if (sel or hot) else 8, 9 if (sel or hot) else 8)
+        xh = self.tx(self.t)
+        if r.left() <= xh <= r.right():
+            p.setPen(QPen(QColor(T["playhead"]), 1.5))
+            p.drawLine(QPointF(xh, r.top()), QPointF(xh, r.bottom() + 8))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(T["playhead"]))
+            p.drawPolygon(QPolygonF([QPointF(xh - 6, r.bottom() + 8), QPointF(xh + 6, r.bottom() + 8), QPointF(xh, r.bottom() + 1)]))
+        p.setPen(QColor(T["text2"]))
+        p.setFont(mk(theme.FONT_BODY, 11, QFont.DemiBold))
+        p.drawText(QRectF(r.left() + 8, r.top() + 4, 260, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                   "Tốc độ tại đầu phát: %.4g /giây" % self.spd_at(self.t))
+
     # ---------------------------------------------------------------- tay nam
     def bez_segments(self):
         ks, out = self.keys(), []
@@ -567,7 +702,9 @@ class GraphPlot(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(T["bg0"]))
         r = self.plot()
+        self._sc = None
         yr = self.yr()
+        self._yr_last = yr
         p.fillRect(QRectF(r.left(), r.bottom(), r.width(), self.MB), QColor(T["bg2"]))
         p.setFont(mk(theme.FONT_BODY, 10))
         for i in range(5):
@@ -576,7 +713,7 @@ class GraphPlot(QWidget):
             p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
             val = yr[1] - (yr[1] - yr[0]) * i / 4
             p.setPen(QColor(T["text3"]))
-            p.drawText(QRectF(2, y - 8, self.ML - 8, 16), Qt.AlignRight | Qt.AlignVCenter, "%.4g" % val)
+            p.drawText(QRectF(2, y - 8, self.ML - 8, 16), Qt.AlignRight | Qt.AlignVCenter, ("%.4g" % val) + (" /s" if self.mode == "speed" else ""))
         pxs = r.width() / ((self.vt1 - self.vt0) or 1)
         step = next((s_ for s_ in self.STEPS if s_ * pxs >= 70), self.STEPS[-1])
         t = math.floor(self.vt0 / step) * step
@@ -594,6 +731,9 @@ class GraphPlot(QWidget):
             p.setPen(QColor(T["text3"]))
             p.setFont(mk(theme.FONT_BODY, 13))
             p.drawText(r, Qt.AlignCenter, "Chọn một lớp để xem đồ thị key frame")
+            return
+        if self.mode == "speed":
+            self._paint_speed(p, r, yr, L)
             return
         ks = self.keys()
         # khung net dut quanh doan cua key duoc chon
@@ -688,7 +828,9 @@ class GraphPlot(QWidget):
     def hit(self, pos):
         if not self.layer:
             return None
-        yr = self.yr()
+        if self.mode == "speed":
+            return self._hit_speed(pos)
+        yr = self._yr_last or self.yr()
         ps = self.param_seg()
         if ps:
             h = self.param_pt(ps[0], ps[1], yr)
@@ -721,12 +863,14 @@ class GraphPlot(QWidget):
             self.d = dict(m="scrub")
             self.seek.emit(self.clampt(self.xt(pos.x())))
             return
+        if self.mode == "speed":
+            return self._press_speed(e, pos)
         h = self.hit(e.pos())
         add = bool(e.modifiers() & (Qt.ShiftModifier | Qt.ControlModifier))
         if h is None:
             self.d = dict(m="box", p0=pos, p1=pos, add=add, moved=False)
             return
-        self.frozen = self.yr()
+        self.frozen = self._yr_last or self.yr()
         if h[0] == "key":
             k = h[1]
             if add and k in self.sel:
@@ -777,8 +921,16 @@ class GraphPlot(QWidget):
                     nt = round(nt / 0.05) * 0.05
                 q.t, q.v = round(nt, 2), qv + (v1 - v0)
             self.layer.kf[self.key].sort()
-            self.sel_changed.emit()
-            self.edited.emit()
+            self._queue_edit()
+        elif m == "skey":
+            dt = (pos.x() - d["x0"]) / r.width() * (self.vt1 - self.vt0)
+            for q, qt in d["snap"]:
+                nt = self.clampt(qt + dt)
+                if e.modifiers() & Qt.ControlModifier:
+                    nt = round(nt / 0.05) * 0.05
+                q.t = round(nt, 2)
+            self.layer.kf[self.key].sort()
+            self._queue_edit()
         else:
             t, v = self.unpx(pos, self.frozen)
             a = d["key"]
@@ -800,13 +952,14 @@ class GraphPlot(QWidget):
                     else:
                         cur[2], cur[3] = x, yy
                     a.e, a.bz = "bezier", tuple(cur)
-                self.picked.emit(a)
-                self.edited.emit()
+                self._pick = a
+                self._queue_edit()
         self.update()
 
     def mouseReleaseEvent(self, e):
         d, pos, r = self.d, QPointF(e.pos()), self.plot()
         self.d, self.frozen = None, None
+        self._flush_edit()                     # day not thay doi con cho khi tha chuot
         if d and d["m"] == "box":
             if d["moved"]:
                 rect = QRectF(d["p0"], d["p1"]).normalized()
@@ -883,6 +1036,8 @@ class GraphPlot(QWidget):
             self.nudge(-0.5 if big else -0.05, 0)
         elif k == Qt.Key_Right:
             self.nudge(0.5 if big else 0.05, 0)
+        elif k in (Qt.Key_Up, Qt.Key_Down) and self.mode == "speed":
+            pass                      # o che do toc do khong chinh gia tri bang phim
         elif k == Qt.Key_Up:
             self.nudge(0, (hi - lo) * (0.05 if big else 0.01))
         elif k == Qt.Key_Down:
@@ -916,6 +1071,18 @@ class GraphPanel(QWidget):
         self.combo.setMinimumWidth(120)
         self.combo.setToolTip("● = kênh đang có key frame")
         h.addWidget(self.combo)
+        self.v_btn, self.s_btn = QPushButton("Giá trị"), QPushButton("Tốc độ")
+        grp = QButtonGroup(self)
+        for b, tip in ((self.v_btn, "Đồ thị giá trị theo thời gian"),
+                       (self.s_btn, "Đồ thị tốc độ: độ nhanh chậm của chuyển động (chỉ xem; kéo key để đổi thời gian)")):
+            b.setObjectName("SmallBtn")
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            grp.addButton(b)
+            h.addWidget(b)
+        self.v_btn.setChecked(True)
+        self.v_btn.clicked.connect(lambda: self._mode("value"))
+        self.s_btn.clicked.connect(lambda: self._mode("speed"))
         self.add_btn = QPushButton("◆＋")
         self.add_btn.setObjectName("SmallBtn")
         self.add_btn.setToolTip("Thêm key tại đầu phát (chỉ kênh này)")
@@ -1048,6 +1215,14 @@ class GraphPanel(QWidget):
         for i in range(self.gal.count()):
             it = self.gal.item(i)
             it.setIcon(ease_icon(it.data(Qt.UserRole)))
+
+    def _mode(self, m):
+        pl = self.plot
+        pl.mode = m
+        pl.frozen = None
+        pl._yr_last = None
+        self.f_v.setEnabled(m == "value" and pl.selk is not None)
+        pl.update()
 
     def _mark_channels(self):
         L = self.plot.layer
