@@ -1,13 +1,35 @@
 """Man hinh Dang nhap + Trang chu (giu nguyen tu ban cu)."""
 import os, math, time, random, datetime
-from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPointF, QSize, QObject, Signal
-from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QLinearGradient,
+from PySide6.QtCore import Qt, QTimer, QUrl, QPoint, QRect, QRectF, QPointF, QSize, QObject, Signal
+from PySide6.QtGui import (QDesktopServices, QKeySequence, QShortcut, QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QLinearGradient,
                          QPainterPath, QPolygonF, QFontDatabase, QFontMetrics, QRadialGradient, QTransform)
-from PySide6.QtWidgets import (QWidget, QApplication)
+from PySide6.QtWidgets import (QWidget, QApplication, QLineEdit, QFileDialog, QMenu,
+                             QInputDialog, QMessageBox)
+import gk_recent
+import gk_dialogs as dlg
+from gk_templates import TEMPLATES
 import gk_theme as theme
 from gk_theme import mk, mixc, star
 from gk_model import LOGO
 from gk_auth import AuthBridge, DEV, draw_brand_icon, draw_google
+
+
+class _Theme(dict):
+    """Bang mau theme hien tai; tu tinh bg3h / line_hi neu gk_theme khong co san."""
+    def __missing__(self, k):
+        if k == "bg3h":
+            return mixc(self["bg3"], self["text"], 0.10).name()
+        if k == "line_hi":
+            return mixc(self["line"], self["text"], 0.25).name()
+        raise KeyError(k)
+
+
+def cur_theme():
+    base = getattr(theme, "T", None)
+    if not base:
+        base = theme.THEMES.get(theme.current_key(), {})
+    return _Theme(base)
+
 
 
 # ------------------------------------------------------------------ cube 3D
@@ -378,12 +400,23 @@ def draw_art(p, r, title):
 CARD_W, CARD_H, CARD_K = 216, 303, 216 / 324
 
 
+def ca(h, a):
+    c = QColor(h)
+    c.setAlpha(a)
+    return c
+
+
 class HomePage(QWidget):
     new_project = Signal(str, float)
-    open_recent = Signal(str)
+    new_template = Signal(str, float)
+    open_recent = Signal(str)       # (khong con dung, giu cho tuong thich)
+    open_file = Signal(str)
     sign_out = Signal()
+    settings_requested = Signal()
+    account_changed = Signal(str, str)
     RATIOS = [("16:9", "YouTube", 16 / 9), ("9:16", "TikTok", 9 / 16), ("1:1", "Vuông", 1.0), ("4:5", "Instagram", 4 / 5)]
-    BAR = 72
+    SORTS = ["Mới nhất", "Tên A–Z"]
+    BAR, TW, TH = 72, 196, 150
 
     def __init__(self):
         super().__init__()
@@ -391,19 +424,154 @@ class HomePage(QWidget):
         self.logo = QPixmap(LOGO)
         self.user = ("Khách", "")
         self.ratio_i = 0
+        self.sort_i = 0
         self.scroll = 0
         self.content_h = 0
         self.hits, self.hot = [], None
-        today = datetime.date.today()
-        d = lambda n: (today - datetime.timedelta(days=n)).strftime("%d/%m/%Y")
-        self.drafts = [("My File", "WHAT NEW APP", 30, "16:9", "0:04", d(1)),
-                       ("Intro vlog", "INTRO VLOG", 30, "16:9", "0:42", d(2)),
-                       ("Edit TikTok", "EDIT TIKTOK", 60, "9:16", "0:15", d(3))]
+        self.recent, self._shown, self._tc = [], [], {}
+        self.toast = ("", 0.0)
+        self.update_info = None
+        self._checked = False
+        self.search = QLineEdit(self)
+        self.search.setPlaceholderText("Tìm dự án…  (Ctrl+F)")
+        self.search.setClearButtonEnabled(True)
+        self.search.setFixedSize(230, 32)
+        self.search.hide()
+        self.search.textChanged.connect(lambda _: self.update())
+        theme.bus.changed.connect(self.update)
+        for key, fn in (("Ctrl+N", self.new_default), ("Ctrl+O", self.pick_file),
+                        ("Ctrl+F", lambda: self.search.setFocus())):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(fn)
+
+    # ---- du lieu
+    def showEvent(self, e):
+        self.refresh()
+        if not self._checked:                      # kiem tra cap nhat im lang 1 lan moi lan chay
+            self._checked = True
+            QTimer.singleShot(1500, lambda: dlg.check_updates(self, True, self._on_update))
+
+    def _on_update(self, r):
+        if r.get("ok") and r.get("newer"):
+            self.update_info = r
+            self.notify("Có bản cập nhật mới %s — mở menu ⚙ để tải" % r["latest"])
+        self.update()
+
+    def refresh(self):
+        self.recent = gk_recent.items()
+        self.update()
 
     def set_user(self, name, email):
         self.user = (name or "Khách", email)
         self.update()
 
+    def shown(self):
+        q = self.search.text().strip().lower()
+        xs = [d for d in self.recent if q in d["name"].lower()]
+        if self.sort_i == 1:
+            xs.sort(key=lambda d: d["name"].lower())
+        return xs
+
+    def notify(self, text):
+        self.toast = (text, time.monotonic() + 3.0)
+        QTimer.singleShot(3100, self.update)
+        self.update()
+
+    def new_default(self):
+        self.new_project.emit("Untitled", self.RATIOS[self.ratio_i][2])
+
+    def pick_file(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Mở dự án", "", "GK KeyFL (*.gkproj)")
+        if f:
+            self.open_file.emit(f)
+
+    def _thumb(self, path):
+        tp = gk_recent.thumb_path(path)
+        try:
+            m = os.path.getmtime(tp)
+        except OSError:
+            return None
+        c = self._tc.get(path)
+        if not c or c[0] != m:
+            pm = QPixmap(tp)
+            c = self._tc[path] = (m, None if pm.isNull() else pm)
+        return c[1]
+
+    # ---- hanh dong tren du an
+    def rename_project(self, d):
+        old = d["path"]
+        name, ok = QInputDialog.getText(self, "Đổi tên dự án", "Tên mới:", text=d["name"])
+        name = name.strip()
+        if not ok or not name or name == d["name"]:
+            return
+        if any(c in name for c in '/\\:*?"<>|\0') or name in (".", ".."):
+            self.notify("Tên không hợp lệ")
+            return
+        new = os.path.join(os.path.dirname(old), name + ".gkproj")
+        if os.path.exists(new):
+            self.notify("Đã có tệp trùng tên")
+            return
+        try:
+            os.rename(old, new)
+        except OSError as ex:
+            self.notify("Không đổi tên được: %s" % ex.strerror)
+            return
+        gk_recent.rename(old, new)
+        self.refresh()
+        self.notify("Đã đổi tên thành “%s”" % name)
+
+    def delete_project(self, d):
+        r = QMessageBox.warning(self, "Xoá dự án", "Xoá hẳn tệp “%s” khỏi ổ đĩa?\nKhông thể hoàn tác." % d["name"],
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.Cancel)
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            os.remove(d["path"])
+        except OSError as ex:
+            self.notify("Không xoá được: %s" % ex.strerror)
+            return
+        gk_recent.remove(d["path"], True)
+        self.refresh()
+        self.notify("Đã xoá “%s”" % d["name"])
+
+    def unlist_project(self, d):
+        gk_recent.remove(d["path"])
+        self.refresh()
+        self.notify("Đã gỡ khỏi danh sách (tệp vẫn còn trên đĩa)")
+
+    def show_folder(self, d):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(d["path"])))
+
+    def card_menu(self, d, gpos):
+        m = QMenu(self)
+        m.addAction("Mở").triggered.connect(lambda: self.open_file.emit(d["path"]))
+        m.addAction("Đổi tên…").triggered.connect(lambda: self.rename_project(d))
+        m.addAction("Hiện trong thư mục").triggered.connect(lambda: self.show_folder(d))
+        m.addSeparator()
+        m.addAction("Gỡ khỏi danh sách").triggered.connect(lambda: self.unlist_project(d))
+        m.addAction("Xoá tệp…").triggered.connect(lambda: self.delete_project(d))
+        m.exec(gpos)
+
+    def gear_menu(self, gpos):
+        m = QMenu(self)
+        m.addAction("⚙  Cài đặt…").triggered.connect(self.settings_requested.emit)
+        m.addAction("👤  Tài khoản…").triggered.connect(self.open_account)
+        m.addSeparator()
+        up = self.update_info
+        a = m.addAction("⟳  Có bản mới %s — tải về…" % up["latest"] if up else "⟳  Kiểm tra cập nhật…")
+        a.triggered.connect(lambda: dlg.check_updates(self, False, self._on_update))
+        m.addAction("🩺  Kiểm tra hệ thống…").triggered.connect(lambda: dlg.run_diag(self))
+        m.addAction("ⓘ  Thông tin GK KeyFL").triggered.connect(lambda: dlg.show_about(self))
+        m.addSeparator()
+        m.addAction("Đăng xuất").triggered.connect(self.sign_out.emit)
+        m.exec(gpos)
+
+    def open_account(self):
+        dlg.open_account(self, self.user[0], self.user[1], self.account_changed.emit, self.sign_out.emit)
+
+    # ---- chuot
     def hit(self, pos):
         pt = QPointF(pos)
         for name, rect in reversed(self.hits):
@@ -426,44 +594,136 @@ class HomePage(QWidget):
         self.scroll = max(0, min(max(0, self.content_h - self.height()), self.scroll - e.angleDelta().y() * 0.6))
         self.update()
 
+    def contextMenuEvent(self, e):
+        h = self.hit(e.pos())
+        if h and h.startswith("card") and int(h[4:]) < len(self._shown):
+            self.card_menu(self._shown[int(h[4:])], e.globalPos())
+
     def mousePressEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
         h = self.hit(e.pos())
         if not h:
+            self.search.clearFocus()
             return
         if h in ("hero", "newcard"):
-            self.new_project.emit("Untitled", self.RATIOS[self.ratio_i][2])
+            self.new_default()
+        elif h == "open":
+            self.pick_file()
         elif h == "signout":
             self.sign_out.emit()
+        elif h == "account":
+            self.open_account()
+        elif h == "gear":
+            r = [r for n, r in self.hits if n == "gear"][0]
+            self.gear_menu(self.mapToGlobal(QPoint(int(r.left()), int(r.bottom()) + 6)))
+        elif h == "sort":
+            self.sort_i = (self.sort_i + 1) % len(self.SORTS)
+            self.update()
         elif h.startswith("ratio"):
             self.ratio_i = int(h[5:])
             self.update()
+        elif h.startswith("tpl"):
+            self.new_template.emit(TEMPLATES[int(h[3:])][0], self.RATIOS[self.ratio_i][2])
         elif h.startswith("card"):
-            self.open_recent.emit(self.drafts[int(h[4:])][0])
+            i = int(h[4:])
+            if i < len(self._shown):
+                self.open_file.emit(self._shown[i]["path"])
+        elif h.startswith("del"):
+            i = int(h[3:])
+            if i < len(self._shown):
+                self.unlist_project(self._shown[i])
+
+    # ---- ve
+    def greeting(self):
+        h = datetime.datetime.now().hour
+        part = "buổi sáng" if h < 11 else "buổi trưa" if h < 14 else "buổi chiều" if h < 18 else "buổi tối"
+        return "Chào %s, %s" % (part, self.user[0])
+
+    def draw_tpl(self, p, r, key, hov):
+        """Hinh xem truoc nho cua mau du an."""
+        T = cur_theme()
+        p.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(r, 16, 16)
+        p.setClipPath(clip)
+        p.fillRect(r, QColor(T["bg2"]))
+        c, ac = r.center(), QColor(T["accent_hi"])
+        p.setPen(Qt.NoPen)
+        if key == "blank":
+            pen = QPen(ca(T["text"], 110), 2)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(40, 26, -40, -26), 8, 8)
+            p.setPen(Qt.NoPen)
+            p.setBrush(ac)
+            p.drawRoundedRect(QRectF(c.x() - 12, c.y() - 2, 24, 4), 2, 2)
+            p.drawRoundedRect(QRectF(c.x() - 2, c.y() - 12, 4, 24), 2, 2)
+        elif key == "title":
+            p.setBrush(QColor(T["text"]))
+            p.drawRoundedRect(QRectF(c.x() - 52, c.y() - 20, 104, 18), 5, 5)
+            p.setBrush(ac)
+            p.drawRoundedRect(QRectF(c.x() - 40, c.y() + 10, 80, 6), 3, 3)
+        elif key == "lower":
+            p.setBrush(ac)
+            p.drawRoundedRect(QRectF(r.left() + 16, r.bottom() - 46, 100, 22), 5, 5)
+            p.setBrush(ca(T["text"], 200))
+            p.drawRoundedRect(QRectF(r.left() + 26, r.bottom() - 40, 56, 5), 2, 2)
+            p.drawRoundedRect(QRectF(r.left() + 26, r.bottom() - 32, 36, 4), 2, 2)
+        elif key == "logo":
+            p.save()
+            p.translate(c)
+            p.rotate(35)
+            p.setBrush(ac)
+            p.drawRoundedRect(QRectF(-24, -24, 48, 48), 10, 10)
+            p.restore()
+            p.setBrush(ca(T["text"], 200))
+            p.drawRoundedRect(QRectF(c.x() - 30, c.y() + 34, 60, 5), 2, 2)
+        elif key == "slides":
+            for i, col in enumerate(("#7a2bff", "#e0457b", "#2f8fe0")):
+                p.setBrush(QColor(col))
+                p.drawRoundedRect(QRectF(r.left() + 22 + i * 40, c.y() - 22 + i * 4, 56, 44), 7, 7)
+        p.restore()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(T["accent_hi"]) if hov else QColor(T["line"]), 2 if hov else 1))
+        p.drawRoundedRect(r, 16, 16)
 
     def paintEvent(self, _):
+        T = cur_theme()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         W, H = self.width(), self.height()
-        p.fillRect(self.rect(), QColor("#0d0d11"))
+        p.fillRect(self.rect(), QColor(T["bg0"]))
         g = QRadialGradient(W * 0.75, 0, max(W, H) * 0.7)
-        g.setColorAt(0, QColor(124, 58, 237, 46))
-        g.setColorAt(1, QColor(124, 58, 237, 0))
+        g.setColorAt(0, ca(T["accent"], 46))
+        g.setColorAt(1, ca(T["accent"], 0))
         p.fillRect(self.rect(), QBrush(g))
         self.hits = []
         M = max(28, min(56, W * 0.04))
         sc = self.scroll = max(0, min(self.scroll, max(0, self.content_h - H)))
+        shown = self._shown = self.shown()
 
         p.save()
         p.setClipRect(QRectF(0, self.BAR, W, H - self.BAR))
+        # --- loi chao
+        gy = self.BAR + 22 - sc
+        p.setPen(QColor(T["text"]))
+        p.setFont(mk(theme.FONT_DISPLAY, 24, QFont.Bold))
+        p.drawText(QRectF(M, gy, W - 2 * M, 36), Qt.AlignLeft | Qt.AlignVCenter, self.greeting())
+        p.setPen(QColor(T["text2"]))
+        p.setFont(mk(theme.FONT_BODY, 14))
+        n = len(self.recent)
+        p.drawText(QRectF(M, gy + 36, W - 2 * M, 22), Qt.AlignLeft | Qt.AlignVCenter,
+                   "Bạn có %d dự án gần đây." % n if n else "Chưa có dự án nào — hãy tạo dự án đầu tiên của bạn.")
+
         # --- hero "Tao du an moi"
-        hero = QRectF(M, self.BAR + 16 - sc, W - 2 * M, 150)
+        hero = QRectF(M, gy + 76, W - 2 * M, 150)
         g = QLinearGradient(hero.left(), hero.top(), hero.right(), hero.bottom())
         g.setColorAt(0, QColor("#ff5e5b"))
-        g.setColorAt(0.55, QColor("#c3419f"))
-        g.setColorAt(1, QColor("#7b4dff"))
+        g.setColorAt(0.55, mixc("#ff5e5b", T["accent"], 0.7))
+        g.setColorAt(1, QColor(T["accent_hi"]))
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(g))
         p.drawRoundedRect(hero, 28, 28)
@@ -480,12 +740,7 @@ class HomePage(QWidget):
         p.restore()
         p.setPen(QColor("#ffffff"))
         p.setFont(mk(theme.FONT_DISPLAY, 34, QFont.Black))
-        p.drawText(QRectF(hero.left() + 40, hero.top() + 34, hero.width() - 200, 48), Qt.AlignLeft | Qt.AlignVCenter, "Tạo dự án mới")
-        p.setPen(QColor(255, 255, 255, 215))
-        p.setFont(mk(theme.FONT_BODY, 15))
-        rl = self.RATIOS[self.ratio_i]
-        p.drawText(QRectF(hero.left() + 40, hero.top() + 86, hero.width() - 200, 24), Qt.AlignLeft | Qt.AlignVCenter,
-                   "Canvas trống · %s %s" % (rl[0], rl[1]))
+        p.drawText(QRectF(hero.left() + 40, hero.top() + 28, hero.width() - 200, 48), Qt.AlignLeft | Qt.AlignVCenter, "Tạo dự án mới")
         c = QPointF(hero.right() - 80, hero.center().y())
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#ffffff"))
@@ -495,73 +750,144 @@ class HomePage(QWidget):
         p.drawRoundedRect(QRectF(c.x() - 4, c.y() - 15, 8, 30), 3, 3)
         self.hits.append(("hero", hero))
 
-        # --- tieu de + chon ti le
-        ry = hero.bottom() + 34
-        p.setPen(QColor("#ffffff"))
+        fm = QFontMetrics(mk(theme.FONT_BODY, 14, QFont.DemiBold))
+        ow = fm.horizontalAdvance("Mở dự án…") + 36
+        if hero.width() > ow + 560:
+            orr = QRectF(c.x() - 34 - 22 - ow, c.y() - 19, ow, 38)
+            p.setPen(QPen(QColor(255, 255, 255, 120), 1))
+            p.setBrush(QColor(255, 255, 255, 60 if self.hot == "open" else 28))
+            p.drawRoundedRect(orr, 19, 19)
+            p.setPen(QColor("#ffffff"))
+            p.setFont(mk(theme.FONT_BODY, 14, QFont.DemiBold))
+            p.drawText(orr, Qt.AlignCenter, "Mở dự án…")
+            self.hits.append(("open", orr))
+
+        fm = QFontMetrics(mk(theme.FONT_BODY, 13, QFont.DemiBold))
+        x = hero.left() + 40
+        for i, (lab, sub, _r) in enumerate(self.RATIOS):
+            txt = "%s  %s" % (lab, sub)
+            cw = fm.horizontalAdvance(txt) + 28
+            r = QRectF(x, hero.top() + 96, cw, 30)
+            sel = i == self.ratio_i
+            p.setPen(Qt.NoPen if sel else QPen(QColor(255, 255, 255, 90), 1))
+            p.setBrush(QColor("#ffffff") if sel else QColor(255, 255, 255, 60 if self.hot == "ratio%d" % i else 24))
+            p.drawRoundedRect(r, 15, 15)
+            p.setPen(QColor("#1b1b22" if sel else "#ffffff"))
+            p.setFont(mk(theme.FONT_BODY, 13, QFont.DemiBold))
+            p.drawText(r, Qt.AlignCenter, txt)
+            self.hits.append(("ratio%d" % i, r))
+            x += cw + 8
+
+        # --- mau du an
+        ty = hero.bottom() + 32
+        p.setPen(QColor(T["text"]))
+        p.setFont(mk(theme.FONT_DISPLAY, 20, QFont.Bold))
+        p.drawText(QRectF(M, ty, 300, 34), Qt.AlignLeft | Qt.AlignVCenter, "Bắt đầu từ mẫu")
+        tg = 16
+        tcols = max(1, int((W - 2 * M + tg) // (self.TW + tg)))
+        tt = ty + 46
+        for i, (key, nm, desc) in enumerate(TEMPLATES):
+            tx = M + (i % tcols) * (self.TW + tg)
+            tyy = tt + (i // tcols) * (self.TH + 18 + tg)
+            hov = self.hot == "tpl%d" % i
+            self.draw_tpl(p, QRectF(tx, tyy - (3 if hov else 0), self.TW, 112), key, hov)
+            p.setPen(QColor(T["text"]))
+            p.setFont(mk(theme.FONT_BODY, 14, QFont.DemiBold))
+            p.drawText(QRectF(tx + 4, tyy + 118, self.TW - 8, 20), Qt.AlignLeft | Qt.AlignVCenter, nm)
+            p.setPen(QColor(T["text3"]))
+            p.setFont(mk(theme.FONT_BODY, 12))
+            p.drawText(QRectF(tx + 4, tyy + 138, self.TW - 8, 18), Qt.AlignLeft | Qt.AlignVCenter, desc)
+            self.hits.append(("tpl%d" % i, QRectF(tx, tyy, self.TW, self.TH + 8)))
+        trows = (len(TEMPLATES) + tcols - 1) // tcols
+
+        # --- tieu de + tim kiem + sap xep
+        ry = tt + trows * (self.TH + 18 + tg) + 8
+        p.setPen(QColor(T["text"]))
         p.setFont(mk(theme.FONT_DISPLAY, 20, QFont.Bold))
         p.drawText(QRectF(M, ry, 300, 34), Qt.AlignLeft | Qt.AlignVCenter, "Dự án gần đây")
         fm = QFontMetrics(mk(theme.FONT_BODY, 13, QFont.DemiBold))
-        x = W - M
-        for i in range(len(self.RATIOS) - 1, -1, -1):
-            lab = self.RATIOS[i][0]
-            cw = fm.horizontalAdvance(lab) + 28
-            r = QRectF(x - cw, ry + 2, cw, 30)
-            sel = i == self.ratio_i
-            p.setPen(Qt.NoPen if sel else QPen(QColor(255, 255, 255, 36), 1))
-            p.setBrush(QColor("#7a2bff") if sel else QColor(255, 255, 255, 26 if self.hot == "ratio%d" % i else 8))
-            p.drawRoundedRect(r, 15, 15)
-            p.setPen(QColor("#ffffff" if sel else "#b4b4c0"))
-            p.setFont(mk(theme.FONT_BODY, 13, QFont.DemiBold))
-            p.drawText(r, Qt.AlignCenter, lab)
-            self.hits.append(("ratio%d" % i, r))
-            x -= cw + 8
+        lab = "⇅  " + self.SORTS[self.sort_i]
+        sw = fm.horizontalAdvance(lab) + 28
+        sr = QRectF(W - M - sw, ry + 2, sw, 30)
+        p.setPen(QPen(QColor(T["line_hi"]), 1))
+        p.setBrush(QColor(T["bg3h"] if self.hot == "sort" else T["bg2"]))
+        p.drawRoundedRect(sr, 15, 15)
+        p.setPen(QColor(T["text2"]))
+        p.setFont(mk(theme.FONT_BODY, 13, QFont.DemiBold))
+        p.drawText(sr, Qt.AlignCenter, lab)
+        self.hits.append(("sort", sr))
+        sx, sy = sr.left() - 12 - self.search.width(), ry + 1
+        if sx > M + 200 and sy > self.BAR and sy < H and (self.recent or self.search.text()):
+            self.search.move(int(sx), int(sy))
+            self.search.show()
+        else:
+            self.search.hide()
 
         # --- luoi project
         gap = 24
         cols = max(1, int((W - 2 * M + gap) // (CARD_W + gap)))
         top = ry + 52
-        items = list(range(len(self.drafts))) + [-1]
+        items = list(range(len(shown))) + [-1]
         for k, it in enumerate(items):
             col, row = k % cols, k // cols
             x0 = M + col * (CARD_W + gap)
             y0 = top + row * (CARD_H + gap)
             name = "newcard" if it < 0 else "card%d" % it
-            hov = self.hot == name
+            hov = self.hot in (name, "del%d" % it)
             p.save()
             p.translate(x0, y0 - (5 if hov else 0))
             p.scale(CARD_K, CARD_K)
             if it < 0:
                 self.draw_new(p, hov)
             else:
-                dr = self.drafts[it]
-                self.draw_card(p, dr[0], dr[1], dr[2], dr[3], dr[4], dr[5], hov)
+                d = shown[it]
+                try:
+                    date = time.strftime("%d/%m/%Y", time.localtime(os.path.getmtime(d["path"])))
+                except OSError:
+                    date = ""
+                rl = min(self.RATIOS, key=lambda q: abs(q[2] - d.get("ratio", 16 / 9)))[0]
+                self.draw_card(p, d["name"], d["name"].upper(), 30, rl, gk_recent.fmt_dur(d.get("dur", 0)), date, hov,
+                               self._thumb(d["path"]))
             p.restore()
             self.hits.append((name, QRectF(x0, y0, CARD_W, CARD_H)))
+            if it >= 0 and hov:
+                dr = QRectF(x0 + CARD_W - 36, y0 + 5, 26, 26)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#e5484d") if self.hot == "del%d" % it else QColor(0, 0, 0, 170))
+                p.drawEllipse(dr)
+                p.setPen(QColor("#ffffff"))
+                p.setFont(mk(theme.FONT_BODY, 13, QFont.Bold))
+                p.drawText(dr, Qt.AlignCenter, "✕")
+                self.hits.append(("del%d" % it, dr))
+        if not shown and self.search.text() and cols > 1:
+            p.setPen(QColor(T["text2"]))
+            p.setFont(mk(theme.FONT_BODY, 15))
+            p.drawText(QRectF(M + CARD_W + gap + 10, top, 360, CARD_H), Qt.AlignLeft | Qt.AlignVCenter,
+                       "Không có dự án nào khớp “%s”." % self.search.text().strip())
         rows = (len(items) + cols - 1) // cols
         self.content_h = top + sc + rows * (CARD_H + gap) + 20
         p.restore()
 
         # --- thanh tren cung
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(13, 13, 17, 238))
+        p.setBrush(ca(T["bg0"], 238))
         p.drawRect(QRectF(0, 0, W, self.BAR))
-        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        p.setPen(QPen(QColor(T["line"]), 1))
         p.drawLine(0, self.BAR, W, self.BAR)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#ffffff"))
         p.drawRoundedRect(QRectF(M, 18, 36, 36), 10, 10)
         p.drawPixmap(QRectF(M + 4, 22, 28, 28), self.logo, QRectF(self.logo.rect()))
-        p.setPen(QColor("#ffffff"))
+        p.setPen(QColor(T["text"]))
         p.setFont(mk(theme.FONT_DISPLAY, 18, QFont.Bold))
         p.drawText(QRectF(M + 48, 18, 200, 36), Qt.AlignVCenter | Qt.AlignLeft, "GK KeyFL")
-        # nguoi dung + dang xuat
         fm = QFontMetrics(mk(theme.FONT_BODY, 13, QFont.DemiBold))
         bw = fm.horizontalAdvance("Đăng xuất") + 28
         br = QRectF(W - M - bw, 20, bw, 32)
-        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
-        p.setBrush(QColor(255, 255, 255, 24 if self.hot == "signout" else 8))
+        p.setPen(QPen(QColor(T["line_hi"]), 1))
+        p.setBrush(QColor(T["bg3h"] if self.hot == "signout" else T["bg2"]))
         p.drawRoundedRect(br, 16, 16)
-        p.setPen(QColor("#ffffff"))
+        p.setPen(QColor(T["text"]))
         p.setFont(mk(theme.FONT_BODY, 13, QFont.DemiBold))
         p.drawText(br, Qt.AlignCenter, "Đăng xuất")
         nm = self.user[0]
@@ -572,17 +898,43 @@ class HomePage(QWidget):
         av = QRectF(nx - 46, 18, 36, 36)
         ag = QLinearGradient(av.topLeft(), av.bottomRight())
         ag.setColorAt(0, QColor("#ff5e5b"))
-        ag.setColorAt(1, QColor("#7a2bff"))
+        ag.setColorAt(1, QColor(T["accent"]))
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(ag))
         p.drawEllipse(av)
         p.setPen(QColor("#ffffff"))
         p.setFont(mk(theme.FONT_DISPLAY, 16, QFont.Bold))
         p.drawText(av, Qt.AlignCenter, nm[:1].upper())
+        # banh rang (cai dat / tai khoan / cap nhat / he thong)
+        gr = QRectF(av.left() - 14 - 36, 18, 36, 36)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(T["bg3h"] if self.hot == "gear" else T["bg2"]))
+        p.drawEllipse(gr)
+        p.setPen(QColor(T["text"]))
+        p.setFont(mk(theme.FONT_BODY, 18))
+        p.drawText(gr, Qt.AlignCenter, "⚙")
+        if self.update_info:
+            p.setPen(QPen(QColor(T["bg0"]), 2))
+            p.setBrush(QColor("#e5484d"))
+            p.drawEllipse(QPointF(gr.right() - 6, gr.top() + 7), 5, 5)
         self.hits.append(("bar", QRectF(0, 0, W, self.BAR)))
         self.hits.append(("signout", br))
+        self.hits.append(("account", QRectF(av.left(), 18, br.left() - av.left() - 8, 36)))
+        self.hits.append(("gear", gr))
 
-    def draw_card(self, p, name, title, fps, ratio, dur, date, hover):
+        # --- thong bao nho
+        if time.monotonic() < self.toast[1]:
+            fm = QFontMetrics(mk(theme.FONT_BODY, 14, QFont.DemiBold))
+            tw = fm.horizontalAdvance(self.toast[0]) + 40
+            tr = QRectF((W - tw) / 2, H - 70, tw, 40)
+            p.setPen(QPen(QColor(T["line_hi"]), 1))
+            p.setBrush(ca(T["bg2"], 245))
+            p.drawRoundedRect(tr, 20, 20)
+            p.setPen(QColor(T["text"]))
+            p.setFont(mk(theme.FONT_BODY, 14, QFont.DemiBold))
+            p.drawText(tr, Qt.AlignCenter, self.toast[0])
+
+    def draw_card(self, p, name, title, fps, ratio, dur, date, hover, thumb=None):
         w, h = 324, 454
         p.save()
         clip = QPainterPath()
@@ -592,7 +944,16 @@ class HomePage(QWidget):
         art = QRectF(0, 0, w, 319)
         p.save()
         p.setClipRect(art, Qt.IntersectClip)
-        draw_art(p, art, title)
+        if thumb is not None:
+            p.fillRect(art, QColor("#0a0a0e"))
+            sw = art.width()
+            sh = sw * thumb.height() / max(1, thumb.width())
+            if sh > art.height():
+                sh = art.height()
+                sw = sh * thumb.width() / max(1, thumb.height())
+            p.drawPixmap(QRectF(art.center().x() - sw / 2, art.center().y() - sh / 2, sw, sh), thumb, QRectF(thumb.rect()))
+        else:
+            draw_art(p, art, title)
         p.restore()
         p.setPen(QColor("#ffffff"))
         p.setFont(mk(theme.FONT_BODY, 32, QFont.DemiBold))
@@ -604,25 +965,25 @@ class HomePage(QWidget):
         p.drawText(QRectF(150, 392, w - 168, 28), Qt.AlignRight | Qt.AlignVCenter, date)
         p.restore()
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor("#a56bff") if hover else QColor(255, 255, 255, 30), 5 if hover else 2))
+        p.setPen(QPen(QColor(cur_theme()["accent_hi"]) if hover else QColor(cur_theme()["line_hi"]), 5 if hover else 2))
         p.drawRoundedRect(QRectF(2.5, 2.5, w - 5, h - 5), 40, 40)
 
     def draw_new(self, p, hover):
+        T = cur_theme()
         w, h = 324, 454
-        p.setBrush(QColor("#15151b" if not hover else "#1c1c26"))
-        pen = QPen(QColor("#a56bff") if hover else QColor(255, 255, 255, 70), 4)
+        p.setBrush(QColor(T["bg2"] if hover else T["bg1"]))
+        pen = QPen(QColor(T["accent_hi"]) if hover else QColor(T["line_hi"]), 4)
         pen.setStyle(Qt.CustomDashLine)
         pen.setDashPattern([4, 3.5])
         p.setPen(pen)
         p.drawRoundedRect(QRectF(3, 3, w - 6, h - 6), 40, 40)
         c = QPointF(w / 2, h / 2 - 16)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#7a2bff" if hover else "#2a2a35"))
+        p.setBrush(QColor(T["accent"] if hover else T["bg3"]))
         p.drawEllipse(c, 62, 62)
-        p.setBrush(QColor("#ffffff"))
+        p.setBrush(QColor(T["on_accent"] if hover else T["text"]))
         p.drawRoundedRect(QRectF(c.x() - 28, c.y() - 7, 56, 14), 5, 5)
         p.drawRoundedRect(QRectF(c.x() - 7, c.y() - 28, 14, 56), 5, 5)
-        p.setPen(QColor("#d6d6e0"))
+        p.setPen(QColor(T["text"]))
         p.setFont(mk(theme.FONT_BODY, 26, QFont.DemiBold))
         p.drawText(QRectF(0, c.y() + 84, w, 40), Qt.AlignCenter, "Dự án mới")
-

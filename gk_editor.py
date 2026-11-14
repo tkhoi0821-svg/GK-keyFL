@@ -18,6 +18,10 @@ from gk_media import MediaSource, AudioEngine
 from gk_vector_ui import make_vector_dock
 from gk_matte_ui import MatteDialog
 from gk_prefs_ui import SettingsDialog
+from gk_plugins import PluginHost
+import gk_recent
+import gk_dialogs
+import gk_templates
 
 DEFAULT_WS = "Mặc định"
 
@@ -35,6 +39,7 @@ class EditorPage(QMainWindow):
         self.audio = AudioEngine()
         self._need_size = False
         self.ws_current = DEFAULT_WS
+        self.plugins = PluginHost(self)
 
         # ---------------- panel
         self.panel = StagePanel(self)
@@ -130,6 +135,7 @@ class EditorPage(QMainWindow):
             self.update_chips()
         theme.bus.changed.connect(self.update_chips)
         self.reset_project(16 / 9)
+        self.plugins.load_all()
 
     # ================= thanh tren =================
     def build_topbar(self):
@@ -146,8 +152,8 @@ class EditorPage(QMainWindow):
 
         for name, fill in (("File", self.fill_file), ("Edit", self.fill_edit), ("View", self.fill_view),
                            ("Workspace", self.fill_workspace), ("Theme", self.fill_theme),
-                           ("Setting", self.fill_setting), ("Tool", stub("Công cụ (chưa có)")),
-                           ("Plugin", stub("Plugin (chưa có)"))):
+                           ("Setting", self.fill_setting), ("Tool", self.fill_tool),
+                           ("Plugin", self.fill_plugin)):
             b = QPushButton(name)
             m = QMenu(b)
             m.aboutToShow.connect(lambda m=m, f=fill: self.refill(m, f))
@@ -201,6 +207,10 @@ class EditorPage(QMainWindow):
 
     def fill_setting(self, m):
         self.act(m, "⚙  Tuỳ chọn…", self.open_settings)
+        m.addSeparator()
+        self.act(m, "⟳  Kiểm tra cập nhật…", lambda: gk_dialogs.check_updates(self))
+        self.act(m, "🩺  Kiểm tra hệ thống…", lambda: gk_dialogs.run_diag(self))
+        self.act(m, "ⓘ  Thông tin GK KeyFL", lambda: gk_dialogs.show_about(self))
 
     def open_settings(self):
         d = getattr(self, "_dlg", None)
@@ -243,10 +253,68 @@ class EditorPage(QMainWindow):
         self.act(m, "◐  Tách nền…", self.open_matte)
 
     def fill_view(self, m):
-        for d in self.docks:
+        for d in self.docks + self.plugins.docks:
             m.addAction(d.toggleViewAction())
         m.addSeparator()
         self.act(m, "Lưới canvas", lambda: self.panel.guide_btn.toggle(), checked=self.panel.guide_btn.isChecked())
+
+    def fill_tool(self, m):
+        L = self.sel
+        ok = bool(L) and L.kind != "bg"
+        keyable = ok and L.kind != "audio"
+        self.act(m, "⧉  Nhân đôi lớp", self.duplicate_layer, enabled=ok)
+        self.act(m, "⟲  Đặt lại vị trí / xoay / tỉ lệ", self.reset_transform, enabled=ok)
+        m.addSeparator()
+        self.act(m, "◆  Thêm key tại vị trí hiện tại", self.add_key, enabled=keyable)
+        self.act(m, "◇  Xoá key tại vị trí hiện tại", self.del_key, enabled=bool(L))
+        self.act(m, "◀  Key trước", lambda: self.key_nav(-1), enabled=bool(L))
+        self.act(m, "▶  Key sau", lambda: self.key_nav(1), enabled=bool(L))
+        sub = m.addMenu("Kiểu nội suy của key tại đây")
+        sub.setEnabled(keyable)
+        for k, n in gk_model.EASES:
+            self.act(sub, n, lambda k=k: self.on_ease(k))
+        sub = m.addMenu("Lặp key frame")
+        sub.setEnabled(keyable)
+        for k, n in gk_model.LOOPS:
+            self.act(sub, n, lambda k=k: self.on_loop(k))
+        m.addSeparator()
+        self.act(m, "⏮  Về đầu dòng thời gian", lambda: self.seek(0))
+        self.act(m, "⏭  Tới cuối dòng thời gian", lambda: self.seek(TOTAL))
+        self.act(m, "Tự động key frame", lambda: prefs.put("autokey", not prefs.get("autokey")),
+                 checked=prefs.get("autokey"))
+        sub = m.addMenu("Tỉ lệ khung hình")
+        for name, r in self.panel.ratios:
+            self.act(sub, name, lambda r=r: self.panel.set_ratio(r))
+
+        self.plugins.fill_tools(m, self.act)
+
+    def duplicate_layer(self):
+        L = self.sel
+        if not L or L.kind == "bg":
+            return
+        N = Layer.from_dict(L.to_dict())
+        N.name = N.name + " (bản sao)"
+        self.stage.layers.append(N)
+        for c in L.clips:
+            self.tl.add_layer_clip(N, c.row, c.start, c.dur)
+        self.tl.refresh()
+        self.select_layer(N)
+        self.rebuild_tree()
+        self.log("Đã nhân đôi '%s'" % L.name)
+
+    def reset_transform(self):
+        L = self.sel
+        if not L or L.kind == "bg":
+            return
+        for ch in PKEYS:
+            L.kf.pop(ch, None)
+            L.loop.pop(ch, None)
+            L.base[ch] = 100.0 if ch.startswith("scl") else 0.0
+        self._keys_changed()
+        self.log("Đã đặt lại biến đổi của '%s'" % L.name)
+
+    def fill_plugin(self, m):
+        self.plugins.fill_menu(m, self.act)
 
     def fill_theme(self, m):
         for key, th in theme.THEMES.items():
@@ -277,6 +345,10 @@ class EditorPage(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.d_timeline, Qt.Horizontal)
         self.tabifyDockWidget(self.d_project, self.d_console)
         self.tabifyDockWidget(self.d_timeline, self.d_graph)
+        for d in self.plugins.docks:
+            self.addDockWidget(Qt.BottomDockWidgetArea, d)
+            self.tabifyDockWidget(self.d_console, d)
+            d.show()
         for d in self.docks:
             if d is not self.d_vector:
                 d.show()
@@ -337,6 +409,9 @@ class EditorPage(QMainWindow):
             self.load_workspace(DEFAULT_WS)
 
     # ================= du an / lop =================
+    def apply_template(self, key):
+        gk_templates.apply(self, key)
+
     def reset_project(self, ratio):
         self.clear_project()
         self.panel.set_ratio(ratio)
@@ -345,6 +420,7 @@ class EditorPage(QMainWindow):
         self.stage.layers.append(bg)
         self.new_layer("Hình vuông", start=0, dur=TOTAL)
         self.seek(0)
+        self.plugins.emit("project_new")
 
     def clear_project(self):
         self.tl.clear()
@@ -365,6 +441,7 @@ class EditorPage(QMainWindow):
         self.tl.refresh()
         self.select_layer(L)
         self.rebuild_tree()
+        self.plugins.emit("layer_added", L)
         return L
 
     def delete_layer(self):
@@ -376,6 +453,7 @@ class EditorPage(QMainWindow):
         if getattr(L, "vid", None) is not None:
             self.audio.players.pop(id(L), None)
         self.stage.layers.remove(L)
+        self.plugins.emit("layer_removed", L)
         self.select_layer(None)
         self.rebuild_tree()
 
@@ -410,6 +488,7 @@ class EditorPage(QMainWindow):
         self.stage.update()
         self.graph.set_layer(L)
         self.sync_props()
+        self.plugins.emit("layer_selected", L)
 
     # ================= thuoc tinh / key frame =================
     def sync_props(self):
@@ -430,6 +509,7 @@ class EditorPage(QMainWindow):
         self.sync_props()
         self.tl.viewport().update()
         self.graph.refresh()
+        self.plugins.emit("keys_changed")
 
     def on_pill(self, key, v):
         if self.sel:
@@ -592,7 +672,9 @@ class EditorPage(QMainWindow):
         try:
             if c == "help":
                 self.log("help | play | pause | seek <giây> | add <shape|text|image|video|audio> | del | "
-                         "ratio <16:9|9:16|1:1|4:5> | theme <gk|unity|blender|alight|teal|light> | save | load")
+                         "ratio <16:9|9:16|1:1|4:5> | theme <%s> | save | load" % "|".join(theme.THEMES))
+                if self.plugins.cmds:
+                    self.log("Lệnh plugin: " + " | ".join(sorted(self.plugins.cmds)))
             elif c in ("play", "pause"):
                 if (c == "play") != self.playing:
                     self.toggle_play()
@@ -611,6 +693,8 @@ class EditorPage(QMainWindow):
                 self.save_project()
             elif c == "load":
                 self.load_project()
+            elif self.plugins.run_command(c, txt.split()[1:]):
+                pass
             else:
                 self.log("Lệnh không hợp lệ. Gõ help.")
         except Exception as ex:
@@ -627,13 +711,22 @@ class EditorPage(QMainWindow):
                 json.dump({"ratio": self.stage.ratio, "layers": [L.to_dict() for L in self.stage.layers]}, fp,
                           ensure_ascii=False)
             self.log("Đã lưu " + f)
+            gk_recent.add(f)
+            self.plugins.emit("project_saved", f)
+            sel, self.stage.sel = self.stage.sel, None      # chup khung canvas lam anh xem truoc
+            gk_recent.save_thumb(f, self.stage.grab(self.stage.canvas().toRect()))
+            self.stage.sel = sel
+            self.stage.update()
         except Exception as ex:
             self.log("Lỗi lưu: %s" % ex)
 
     def load_project(self):
         f, _ = QFileDialog.getOpenFileName(self, "Mở dự án", "", "GK KeyFL (*.gkproj)")
-        if not f:
-            return
+        if f:
+            self.load_path(f)
+
+    def load_path(self, f):
+        """Mo 1 tep .gkproj. Tra ve True neu thanh cong."""
         try:
             with open(f, encoding="utf-8") as fp:
                 d = json.load(fp)
@@ -652,8 +745,12 @@ class EditorPage(QMainWindow):
             self.rebuild_tree()
             self.seek(0)
             self.log("Đã mở " + f)
+            gk_recent.add(f)
+            self.plugins.emit("project_loaded", f)
+            return True
         except Exception as ex:
             self.log("Lỗi mở: %s" % ex)
+            return False
 
     # ================= nguoi dung / phat =================
     def set_user(self, name):
@@ -688,6 +785,7 @@ class EditorPage(QMainWindow):
         self.prog.setValue(int(t / TOTAL * 100))
         if self.playing and not self._ticking:
             self.audio.sync(self.stage.layers, t, True, force=True)
+        self.plugins.emit("seek", t)
 
     def tick(self):
         now = time.monotonic()
@@ -717,3 +815,4 @@ class EditorPage(QMainWindow):
         else:
             self.timer.stop()
             self.audio.stop_all()
+        self.plugins.emit("play" if self.playing else "pause")
