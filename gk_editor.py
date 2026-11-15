@@ -27,6 +27,10 @@ from gk_bezier import BezierDialog
 import gk_trash
 from gk_trash_ui import TrashPanel
 
+import gk_debug
+import gk_safe
+import gk_3d
+
 DEFAULT_WS = "Mặc định"
 
 
@@ -90,6 +94,7 @@ class EditorPage(QMainWindow):
         self.insp.ease_all.connect(self.on_ease_all)
         self.insp.loop_chosen.connect(self.on_loop)
         self.insp.shape_changed.connect(self.on_shape)
+        self.insp.mat_changed.connect(self.on_mat)
         self.insp.mesh_changed.connect(self.on_mesh)
         self.insp.mesh_reset.connect(self.on_mesh_reset)
         self.insp.mesh_keys.connect(self.on_mesh_keys)
@@ -155,6 +160,8 @@ class EditorPage(QMainWindow):
         self.stats.start()
         prefs.bus.changed.connect(self.apply_prefs)
         self.apply_prefs("*")
+        self.s3d = gk_3d.attach(self)          # phai gan truoc debug de debug (den trang) bao ca che do 3D
+        self.dbg = gk_debug.attach(self)
         self.insp.autokey.toggled.connect(lambda v: prefs.put("autokey", bool(v)))
 
         self.apply_default_layout()
@@ -166,6 +173,7 @@ class EditorPage(QMainWindow):
         theme.bus.changed.connect(self.update_chips)
         self.reset_project(16 / 9)
         self.plugins.load_all()
+        self._init_safe()
 
     # ================= phim tat =================
     def setup_shortcuts(self):
@@ -191,6 +199,10 @@ class EditorPage(QMainWindow):
             ("Ctrl+V", self.paste_layer, False),
             ("Ctrl+D", self.duplicate_layer, False),
             ("Ctrl+B", self.open_bezier, False),
+            ("F3", lambda: self.dbg.toggle_mode(), False),
+            ("F4", lambda: self.s3d.toggle(), False),
+            ("Alt+F3", lambda: self.dbg.toggle_stats(), False),
+            ("Shift+C", self.toggle_cam_view, False),
             ("K", self.add_key, False),
             ("Shift+K", self.del_key, False),
             ("Alt+Left", lambda: self.key_nav(-1), True),
@@ -280,6 +292,9 @@ class EditorPage(QMainWindow):
         m.addSeparator()
         self.act(m, "⟳  Kiểm tra cập nhật…", lambda: gk_dialogs.check_updates(self))
         self.act(m, "🩺  Kiểm tra hệ thống…", lambda: gk_dialogs.run_diag(self))
+        self.act(m, "🐞  Chế độ Debug (đen trắng)\tF3", lambda: self.dbg.toggle_mode())
+        self.act(m, "🧊  Chế độ 3D\tF4", lambda: self.s3d.toggle())
+        self.act(m, "📊  Thông số FPS / RAM\tAlt+F3", lambda: self.dbg.toggle_stats())
         self.act(m, "ⓘ  Thông tin GK KeyFL", lambda: gk_dialogs.show_about(self))
 
     def open_settings(self):
@@ -350,6 +365,12 @@ class EditorPage(QMainWindow):
         self.act(m, "◀  Key trước\tAlt+←", lambda: self.key_nav(-1), enabled=bool(L))
         self.act(m, "▶  Key sau\tAlt+→", lambda: self.key_nav(1), enabled=bool(L))
         self.act(m, "⌇  Cửa sổ Cubic Bézier…\tCtrl+B", self.open_bezier, enabled=keyable)
+        m.addSeparator()
+        self.act(m, "🎥  Thêm camera 2D (pan / zoom)", lambda: self.new_layer("Camera 2D"))
+        self.act(m, "🎥  Thêm camera 3D (di chuyển 3 chiều)", lambda: self.new_layer("Camera 3D"))
+        self.act(m, "👁  Xem qua camera\tShift+C", self.toggle_cam_view, checked=self.stage.cam_view,
+                 enabled=any(x.kind == "camera" for x in self.stage.layers))
+        m.addSeparator()
         sub = m.addMenu("Kiểu nội suy của key tại đây")
         sub.setEnabled(keyable)
         for k, n in gk_model.EASES:
@@ -657,11 +678,27 @@ class EditorPage(QMainWindow):
 
     def new_layer(self, kn, path=None, start=None, dur=5.0):
         kind, row, col = KINDS[kn]
+        if kind == "camera":
+            old = next((x for x in self.stage.layers if x.kind == "camera"), None)
+            if old is not None:
+                self.select_layer(old)
+                self.log("Dự án đã có camera (mỗi dự án 1 camera). Đã chọn camera đó.")
+                return old
         n = sum(1 for x in self.stage.layers if x.kind == kind) + 1
         L = Layer(os.path.basename(path) if path else "%s %d" % (kn, n), kind, col)
         L.path = path
         if kn in FORMS:
             L.extra["form"] = FORMS[kn]
+        if kind == "light":
+            lt = next(k for k, (nm, _c) in gk_model.LIGHT_TYPES.items() if kn.startswith(nm))
+            L.extra["lt"], L.extra["mode"] = lt, "3d" if kn.endswith("3D") else "2d"
+            L.base["op"] = 80.0
+            L.base["pos1"] = 60.0 if L.extra["mode"] == "3d" else 40.0      # 3D: nguon sang o tren cao de co bong do
+            L.base["pos2"] = 30.0 if L.extra["mode"] == "3d" else 0.0
+        if kind == "camera":
+            L.extra["cam"] = "3d" if "3D" in kn else "2d"
+            L.name = L.text = kn
+            start, dur = 0.0, max(dur, gk_model.DURATION)
         if path and kind == "image":
             L.pix = QPixmap(path)
         self.stage.layers.append(L)
@@ -752,7 +789,11 @@ class EditorPage(QMainWindow):
         self.stage.update()
 
     def on_clip_sel(self):
-        for c in self.tl.sc.selectedItems():
+        try:
+            items = self.tl.sc.selectedItems()
+        except RuntimeError:        # scene dang bi huy (thoat app / dong trang): bo qua
+            return
+        for c in items:
             if isinstance(c, LayerClip):
                 self.select_layer(c.layer)
                 break
@@ -788,6 +829,16 @@ class EditorPage(QMainWindow):
         self.graph.refresh()
         self._bez_sync()
         self.plugins.emit("keys_changed")
+
+    def on_mat(self, typ, amt):
+        L = self.sel
+        if not L or L.kind not in ("shape", "text", "image", "video"):
+            return
+        if typ == "none":
+            L.extra.pop("mat", None)
+        else:
+            L.extra["mat"] = {"type": typ, "amt": int(amt)}
+        self.stage.update()
 
     def on_shape(self, form, sides, inner, rnd):
         L = self.sel
@@ -896,6 +947,14 @@ class EditorPage(QMainWindow):
         if self.sel:
             self.sel.set_loop_all(m)
             self._keys_changed()
+
+    def toggle_cam_view(self):
+        if not any(x.kind == "camera" for x in self.stage.layers):
+            self.log("Chưa có camera: Tool > Thêm camera 2D / 3D.")
+            return
+        self.stage.cam_view = not self.stage.cam_view
+        self.stage.update()
+        self.log("Xem qua camera: " + ("BẬT" if self.stage.cam_view else "tắt (khung camera hiện trên canvas)"))
 
     def open_bezier(self):
         d = getattr(self, "_bez_dlg", None)
@@ -1014,7 +1073,7 @@ class EditorPage(QMainWindow):
         try:
             if c == "help":
                 self.log("help | play | pause | seek <giây> | add <shape|text|image|video|audio> | del | "
-                         "ratio <16:9|9:16|1:1|4:5> | theme <%s> | save | load" % "|".join(theme.THEMES))
+                         "3d | debug [on|off|stats|log|test] | ratio <16:9|9:16|1:1|4:5> | theme <%s> | save | load" % "|".join(theme.THEMES))
                 if self.plugins.cmds:
                     self.log("Lệnh plugin: " + " | ".join(sorted(self.plugins.cmds)))
             elif c in ("play", "pause"):
@@ -1031,6 +1090,10 @@ class EditorPage(QMainWindow):
                 self.panel.set_ratio(float(w) / float(h))
             elif c == "theme" and a[1] in theme.THEMES:
                 theme.set_theme(a[1])
+            elif c == "3d":
+                self.s3d.toggle()
+            elif c == "debug":
+                self.dbg.command(a[1:])
             elif c == "save":
                 self.save_project()
             elif c == "load":
@@ -1055,12 +1118,16 @@ class EditorPage(QMainWindow):
             self.log("Đã lưu " + f)
             gk_recent.add(f)
             self.plugins.emit("project_saved", f)
+            _dm, self.dbg.mode = self.dbg.mode, False         # anh xem truoc phai ra mau that
+            _d3, self.s3d.on = self.s3d.on, False
             sel, self.stage.sel = self.stage.sel, None      # chup khung canvas lam anh xem truoc
             zm, pn = self.stage.zoom, self.stage.pan
             self.stage.zoom, self.stage.pan = 1.0, type(pn)(0, 0)     # chup o zoom 100%
             gk_recent.save_thumb(f, self.stage.grab(self.stage.canvas().toRect()))
             self.stage.zoom, self.stage.pan = zm, pn
             self.stage.sel = sel
+            self.dbg.mode = _dm
+            self.s3d.on = _d3
             self.stage.update()
         except Exception as ex:
             self.log("Lỗi lưu: %s" % ex)
@@ -1102,6 +1169,31 @@ class EditorPage(QMainWindow):
     def set_user(self, name):
         self.greet.setText("Xin chào\n%s" % (name or "Khách"))
         self.avatar.set_name(name)
+
+    def _init_safe(self):
+        self.safe_chip = QLabel("🛡 SAFE MODE")
+        self.safe_chip.setObjectName("Chip")
+        self.safe_chip.setStyleSheet("color:#fff;background:#c0392b;border-radius:4px;padding:1px 8px;font-weight:600;")
+        self.safe_chip.setToolTip("Plugin không được nạp. Menu Plugin > Thoát Safe Mode để nạp lại.")
+        self.statusBar().addPermanentWidget(self.safe_chip)
+        self.update_safe_chip()
+        self._auto = QTimer(self)
+        self._auto.setInterval(60000)
+        self._auto.timeout.connect(self._autosave)
+        self._auto.start()
+
+    def update_safe_chip(self):
+        self.safe_chip.setVisible(gk_safe.SAFE)
+
+    def _autosave(self):
+        """Tu luu nen moi 60 giay de khong mat du an neu ung dung sap."""
+        try:
+            if not any(L.kind != "bg" for L in self.stage.layers):
+                return
+            gk_safe.write_recovery(json.dumps({"ratio": self.stage.ratio, "layers": [L.to_dict() for L in self.stage.layers]},
+                                              ensure_ascii=False))
+        except Exception:
+            pass
 
     def update_stats(self):
         try:
@@ -1149,6 +1241,7 @@ class EditorPage(QMainWindow):
         self.stage.update()
 
     def tick(self):
+        self.dbg.on_tick()
         now = time.monotonic()
         dt = min(0.1, now - self._last)
         self._last = now

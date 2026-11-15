@@ -2,12 +2,13 @@
 import math
 from PySide6.QtCore import Qt, QRectF, QPointF, QSize, QEvent, Signal
 from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPixmap, QIcon, QLinearGradient, QPainterPath,
-                         QPolygonF, QFontMetrics, QTransform)
+                         QPolygonF, QFontMetrics, QTransform, QRadialGradient)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QSlider,
                              QDoubleSpinBox, QComboBox, QLineEdit, QPlainTextEdit, QCheckBox, QFrame, QToolButton,
                              QScrollArea, QListWidget, QListWidgetItem, QDockWidget, QMenu, QSpinBox)
 import gk_theme as theme
 import gk_prefs as prefs
+import gk_material
 from gk_theme import T, mk, mixc
 from gk_model import LOGO, BODY, PKEYS, KINDS, EASES, LOOPS, PAINTERS, ICONS, FORM_NAMES, FORM_GROUPS, FORMS
 from gk_pages import draw_cube
@@ -456,6 +457,7 @@ class Stage(QWidget):
         self.guides = False
         self.mode, self.hot, self.gd = "select", None, None
         self.zoom, self.pan, self.pan_d = 1.0, QPointF(0, 0), None     # zoom / keo canvas (chuot giua hoac Alt+keo)
+        self.cam_view = False                        # True: nhin qua camera
         self.md, self.mesh_hot = None, None          # diem luoi dang keo / dang tro (cot, hang)
         self.setMouseTracking(True)
         self.setMinimumSize(320, 200)
@@ -499,6 +501,10 @@ class Stage(QWidget):
         e.accept()
 
     def body(self, L, r):
+        if L.kind == "camera":
+            return QRectF(-r.width() / 2, -r.height() / 2, r.width(), r.height())
+        if L.kind == "light":
+            return QRectF(-18, -18, 36, 36)            # tay nam de chon / keo; hieu ung ve bang draw_lights
         v = getattr(L, "vid", None)
         if L.pix is not None and not L.pix.isNull():
             w = r.width() * L.wfrac
@@ -511,7 +517,144 @@ class Stage(QWidget):
             w, h = r.width() * fw, r.height() * fh
         return QRectF(-w / 2, -h / 2, w, h)
 
+    # ---------------------------------------------------------------- camera
+    def view_cam(self):
+        """Camera dang ap dung (khi bat 'Xem qua camera' hoac dang phat), hoac None."""
+        if not (self.cam_view or getattr(self.m, "playing", False)):
+            return None
+        return next((C for C in self.layers if C.kind == "camera" and C.alive(self.t)), None)
+
+    def cam_frame_tf(self, L, r):
+        """Khung camera tren canvas (che do chinh sua): vi tri / xoay cua camera, co = 1/zoom."""
+        t, c = self.t, r.center()
+        m = QTransform()
+        m.translate(c.x() + L.get("pos0", t) * r.width() / 200, c.y() - L.get("pos1", t) * r.height() / 200)
+        s = 100.0 / max(5.0, L.get("scl0", t))
+        if L.extra.get("cam") == "3d":
+            m.rotate(L.get("rot0", t), Qt.XAxis)
+            m.rotate(L.get("rot1", t), Qt.YAxis)
+            s *= 1 + max(-100.0, min(100.0, L.get("pos2", t))) / 200
+        m.rotate(L.get("rot2", t))
+        m.scale(s, s)
+        return m
+
+    def cam_xf(self, C, r):
+        """Phep bien doi canh -> man hinh khi nhin qua camera C (nghich dao cua phep bien doi camera)."""
+        t, c = self.t, r.center()
+        off = QPointF(C.get("pos0", t) * r.width() / 200, -C.get("pos1", t) * r.height() / 200)
+        s = max(0.05, C.get("scl0", t) / 100)
+        m = QTransform()
+        m.translate(c.x(), c.y())
+        m.rotate(-C.get("rot2", t))
+        if C.extra.get("cam") == "3d":
+            m.rotate(-C.get("rot1", t), Qt.YAxis)
+            m.rotate(-C.get("rot0", t), Qt.XAxis)
+            s /= 1 + max(-100.0, min(100.0, C.get("pos2", t))) / 200      # Z duong = lui ra xa
+        m.scale(s, s)
+        m.translate(-c.x() - off.x(), -c.y() - off.y())
+        return m
+
+    # ---------------------------------------------------------------- anh sang (2D: phu sang)
+    def draw_lights(self, p, r):
+        t = self.t
+        for L in self.layers:
+            if L.kind != "light" or not L.alive(t):
+                continue
+            a = max(0.0, min(1.0, L.get("op", t) / 100))
+            col = QColor(L.color)
+            p.save()
+            p.setTransform(self.tf(L, r), True)
+            p.setPen(Qt.NoPen)
+            if L.extra.get("mode") == "3d":              # nguon sang 3D: chi hien dau hieu o 2D (hieu ung that nam o che do 3D F4)
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(col, 1.5, Qt.DashLine))
+                p.drawEllipse(QPointF(0, 0), 12, 12)
+                p.setFont(mk(theme.FONT_BODY, 9, QFont.DemiBold))
+                p.drawText(QPointF(16, 4), "%s 3D" % L.extra.get("lt", "sun").upper())
+                p.restore()
+                continue
+            p.setCompositionMode(QPainter.CompositionMode_Screen)
+            lt, W, H = L.extra.get("lt", "sun"), r.width(), r.height()
+
+            def tone(alpha, c=col):
+                q = QColor(c)
+                q.setAlphaF(max(0.0, min(1.0, alpha)))
+                return q
+
+            if lt == "ray":                              # tia: chum sang hinh non, huong theo goc xoay (0 = chieu xuong)
+                Lg, w0, w1 = H * 1.3, W * 0.012, W * 0.22
+                g = QLinearGradient(0, 0, 0, Lg)
+                g.setColorAt(0, tone(a * 0.85))
+                g.setColorAt(0.5, tone(a * 0.3))
+                g.setColorAt(1, tone(0))
+                p.setBrush(QBrush(g))
+                p.drawPolygon(QPolygonF([QPointF(-w0, 0), QPointF(w0, 0), QPointF(w1, Lg), QPointF(-w1, Lg)]))
+                g2 = QLinearGradient(0, 0, 0, Lg)
+                g2.setColorAt(0, tone(a * 0.7))
+                g2.setColorAt(1, tone(0))
+                p.setBrush(QBrush(g2))
+                p.drawPolygon(QPolygonF([QPointF(-w0 * 0.5, 0), QPointF(w0 * 0.5, 0), QPointF(w1 * 0.45, Lg), QPointF(-w1 * 0.45, Lg)]))
+                R = W * 0.05
+                gg = QRadialGradient(QPointF(0, 0), R)
+                gg.setColorAt(0, tone(a))
+                gg.setColorAt(1, tone(0))
+                p.setBrush(QBrush(gg))
+                p.drawEllipse(QPointF(0, 0), R, R)
+            elif lt == "moon":                           # trang: quang xanh lanh + luoi liem
+                R = W * 0.25
+                g = QRadialGradient(QPointF(0, 0), R)
+                g.setColorAt(0, tone(a * 0.8))
+                g.setColorAt(0.3, tone(a * 0.3))
+                g.setColorAt(1, tone(0))
+                p.setBrush(QBrush(g))
+                p.drawEllipse(QPointF(0, 0), R, R)
+                rm = R * 0.12
+                path = QPainterPath()
+                path.addEllipse(QPointF(0, 0), rm, rm)
+                cut = QPainterPath()
+                cut.addEllipse(QPointF(rm * 0.45, -rm * 0.15), rm * 0.85, rm * 0.85)
+                p.setBrush(tone(a, QColor("#f4f8ff")))
+                p.drawPath(path.subtracted(cut))
+            else:                                        # sun: quang nong + tia toa
+                R = W * 0.4
+                g = QRadialGradient(QPointF(0, 0), R)
+                g.setColorAt(0, tone(a * 0.95))
+                g.setColorAt(0.25, tone(a * 0.35))
+                g.setColorAt(1, tone(0))
+                p.setBrush(QBrush(g))
+                p.drawEllipse(QPointF(0, 0), R, R)
+                for i in range(14):
+                    p.save()
+                    p.rotate(i * 360 / 14)
+                    p.drawPolygon(QPolygonF([QPointF(-R * 0.03, 0), QPointF(R * 0.03, 0), QPointF(0, -R * 0.95)]))
+                    p.restore()
+                p.setBrush(tone(a, QColor("#ffffff")))
+                p.drawEllipse(QPointF(0, 0), R * 0.05, R * 0.05)
+            p.restore()
+
+    def draw_camera(self, p, r):
+        if self.view_cam() is not None:
+            return
+        for C in self.layers:
+            if C.kind != "camera" or not C.alive(self.t):
+                continue
+            m = self.tf(C, r)
+            poly = m.map(QPolygonF(self.body(C, r)))
+            sel = C is self.sel
+            col = QColor("#ff8a3d")
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(col, 3 if sel else 2, Qt.SolidLine if sel else Qt.DashLine))
+            p.drawPolygon(poly)
+            o = m.map(QPointF(0, 0))
+            p.setPen(QPen(col, 1.5))
+            p.drawLine(QPointF(o.x() - 9, o.y()), QPointF(o.x() + 9, o.y()))
+            p.drawLine(QPointF(o.x(), o.y() - 9), QPointF(o.x(), o.y() + 9))
+            p.setFont(mk(theme.FONT_BODY, 10, QFont.DemiBold))
+            p.drawText(poly.at(0) + QPointF(6, 16), "CAM " + ("3D" if C.extra.get("cam") == "3d" else "2D"))
+
     def tf(self, L, r, skew=True):
+        if L.kind == "camera":
+            return self.cam_frame_tf(L, r)
         t, c = self.t, r.center()
         z = max(-100.0, min(100.0, L.get("pos2", t)))
         f = 1 / (1 - z / 200)
@@ -526,6 +669,9 @@ class Stage(QWidget):
             tb = math.tan(math.radians(max(-80.0, min(80.0, L.get("skw1", t)))))
             if ta or tb:
                 m = QTransform(1, tb, ta, 1, 0, 0) * m
+        C = self.view_cam() if L.kind != "bg" else None
+        if C is not None:
+            m = m * self.cam_xf(C, r)
         return m
 
     def draw_layer(self, p, L, b):
@@ -906,12 +1052,16 @@ class Stage(QWidget):
                 continue
             if L.kind == "bg":
                 p.fillRect(r, QColor(L.color))
-            elif L.kind != "audio":
+            elif L.kind not in ("audio", "camera", "light"):
                 p.save()
                 p.setTransform(self.tf(L, r), True)
                 p.setOpacity(max(0.0, min(1.0, L.get("op", self.t) / 100)))
-                self.draw_full(p, L, self.body(L, r))
+                if gk_material.mat_of(L):
+                    gk_material.paint(self, p, L, self.body(L, r))
+                else:
+                    self.draw_full(p, L, self.body(L, r))
                 p.restore()
+        self.draw_lights(p, r)
         if self.guides:
             p.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt.DashLine))
             for k in (1, 2):
@@ -921,6 +1071,7 @@ class Stage(QWidget):
             p.drawLine(QPointF(r.center().x(), r.top()), QPointF(r.center().x(), r.bottom()))
             p.drawLine(QPointF(r.left(), r.center().y()), QPointF(r.right(), r.center().y()))
         p.restore()
+        self.draw_camera(p, r)
         p.setBrush(Qt.NoBrush)
         p.setPen(QPen(QColor(T["frame"]), 2))
         p.drawRect(r)
@@ -951,8 +1102,15 @@ class Stage(QWidget):
 
     def hit(self, pos):
         r = self.canvas()
+        if self.view_cam() is None:                      # khung camera: chon bang cach bam vao vien
+            for C in reversed(self.layers):
+                if C.kind == "camera" and C.alive(self.t):
+                    poly = self.tf(C, r).map(QPolygonF(self.body(C, r)))
+                    pts = [poly.at(i) for i in range(poly.count())]
+                    if any(seg_dist(QPointF(pos), pts[i], pts[(i + 1) % len(pts)]) < 8 for i in range(len(pts))):
+                        return C
         for L in reversed(self.layers):
-            if L.kind in ("bg", "audio") or not L.alive(self.t):
+            if L.kind in ("bg", "audio", "camera") or not L.alive(self.t):
                 continue
             inv, ok = self.tf(L, r).inverted()
             if ok and self.body(L, r).contains(inv.map(QPointF(pos))):
@@ -1252,7 +1410,7 @@ class LayerList(QWidget):
 
     def icon(self, p, L, r):
         col = {"shape": L.color, "text": "#e0a526", "image": "#2f8fe0", "video": "#2f8fe0",
-               "audio": "#2fb37a"}.get(L.kind, L.color if L.kind in PAINTERS else T["bg3"])
+               "audio": "#2fb37a", "camera": "#ff8a3d", "light": "#f5c542"}.get(L.kind, L.color if L.kind in PAINTERS else T["bg3"])
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(col))
         p.drawRoundedRect(r, 7, 7)
@@ -1272,6 +1430,14 @@ class LayerList(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor("#ffffff"))
             p.drawPolygon(QPolygonF([QPointF(c.x() - 4, c.y() - 6), QPointF(c.x() + 6, c.y()), QPointF(c.x() - 4, c.y() + 6)]))
+        elif k == "light":
+            p.drawEllipse(QPointF(c.x(), c.y()), 3.5, 3.5)
+            for i in range(8):
+                a_ = math.radians(i * 45)
+                p.drawLine(QPointF(c.x() + 6 * math.cos(a_), c.y() + 6 * math.sin(a_)), QPointF(c.x() + 9 * math.cos(a_), c.y() + 9 * math.sin(a_)))
+        elif k == "camera":
+            p.drawRoundedRect(QRectF(c.x() - 7, c.y() - 4, 10, 8), 2, 2)
+            p.drawPolyline(QPolygonF([QPointF(c.x() + 3, c.y() - 1), QPointF(c.x() + 8, c.y() - 4), QPointF(c.x() + 8, c.y() + 4), QPointF(c.x() + 3, c.y() + 1)]))
         elif k == "audio":
             for dx, h in ((-5, 5), (0, 10), (5, 6)):
                 p.drawLine(QPointF(c.x() + dx, c.y() - h / 2), QPointF(c.x() + dx, c.y() + h / 2))
@@ -1356,9 +1522,17 @@ class LayerPanel(QWidget):
         self.add.setObjectName("Accent")
         self.add_menu = QMenu(self.add)
         for k, (kd, _r, _c) in KINDS.items():
+            if kd == "light":
+                continue                                   # nam trong menu con "Ánh sáng"
             if kd == "shape" and k in FORMS and k != "Hình vuông":
                 continue                                   # cac hinh khac nam trong menu con "Hình dạng"
             self.add_menu.addAction(k)
+        lm = self.add_menu.addMenu("💡 Ánh sáng")
+        for md, hint in (("2D", "phủ sáng"), ("3D", "nguồn sáng thật, có bóng đổ")):
+            sm = lm.addMenu("%s  (%s)" % (md, hint))
+            for k, (kd, _r, _c) in KINDS.items():
+                if kd == "light" and k.endswith(md):
+                    sm.addAction(k)
         shapes = self.add_menu.addMenu("Hình dạng  (%d)" % len(FORMS))
         for grp, items in FORM_GROUPS:
             gm = shapes.addMenu(grp)
@@ -1454,6 +1628,7 @@ class Inspector(QScrollArea):
     mesh_reset = Signal()
     mesh_keys = Signal(bool)                     # True: key ca luoi tai dau phat / False: xoa key luoi
     ease_all = Signal(str)                       # dat 1 kieu noi suy cho moi key cua lop
+    mat_changed = Signal(str, int)             # chat lieu, cuong do %
     shape_changed = Signal(str, int, int, int)   # dang, so canh, do nhon %, bo goc
 
     def __init__(self):
@@ -1532,6 +1707,20 @@ class Inspector(QScrollArea):
             w_.valueChanged.connect(self._shape)
         self.form_cb.activated.connect(lambda _: self._shape())
         pv.addWidget(self.s_shape)
+
+        self.s_mat = Section("Chất liệu")
+        self.mat_cb = QComboBox()
+        for k, n in gk_material.MATS:
+            self.mat_cb.addItem(n, k)
+        self.mat_amt = QSlider(Qt.Horizontal)
+        self.mat_amt.setRange(0, 100)
+        self.mat_amt.setValue(70)
+        self.s_mat.bl.addWidget(self.mat_cb)
+        self.s_mat.bl.addWidget(QLabel("Cường độ"))
+        self.s_mat.bl.addWidget(self.mat_amt)
+        self.mat_cb.activated.connect(lambda _: self._mat())
+        self.mat_amt.valueChanged.connect(self._mat)
+        pv.addWidget(self.s_mat)
 
         s2 = Section("Biến đổi")
         grid = QGridLayout()
@@ -1672,6 +1861,10 @@ class Inspector(QScrollArea):
         if not self._sync:
             self.pill_changed.emit(key, float(v))
 
+    def _mat(self, *_):
+        if not self._sync:
+            self.mat_changed.emit(self.mat_cb.currentData(), self.mat_amt.value())
+
     def _shape(self, *_):
         if not self._sync:
             self.shape_changed.emit(self.form_cb.currentData(), self.sh_sides.value(), self.sh_inner.value(),
@@ -1694,6 +1887,12 @@ class Inspector(QScrollArea):
             sp.blockSignals(True)
             sp.setValue(L.get(k, t) if L else (100.0 if k.startswith("scl") else 0.0))
             sp.blockSignals(False)
+        has_mat = L is not None and L.kind in gk_material.KINDS
+        self.s_mat.setVisible(has_mat)
+        if has_mat:
+            m = L.extra.get("mat") or {}
+            self.mat_cb.setCurrentIndex(max(0, self.mat_cb.findData(m.get("type", "none"))))
+            self.mat_amt.setValue(int(m.get("amt", 70)))
         is_shape = L is not None and L.kind == "shape"
         self.s_shape.setVisible(is_shape)
         if is_shape:
@@ -1716,7 +1915,7 @@ class Inspector(QScrollArea):
         self.op_sl.setEnabled(moves)
         self.op_sl.setValue(int(L.get("op", t)) if L else 100)
         self.name_in.setEnabled(L is not None and L.kind != "bg")
-        self.col_btn.setEnabled(L is not None and (L.kind in ("bg", "shape", "text") or L.kind in PAINTERS))
+        self.col_btn.setEnabled(L is not None and (L.kind in ("bg", "shape", "text", "light") or L.kind in PAINTERS))
         has_img = bool(L is not None and L.kind == "image" and L.pix is not None and not L.pix.isNull())
         self.matte_btn.setEnabled(has_img)
         self.vector_btn.setEnabled(has_img)

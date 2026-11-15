@@ -4,6 +4,9 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 import gk_theme as theme
 import gk_recent
+import gk_debug
+import gk_safe
+from PySide6.QtWidgets import QMessageBox
 from gk_model import LOGO
 from gk_auth import load_user, save_user, clear_user
 from gk_pages import LoginPage, HomePage
@@ -71,16 +74,36 @@ class Main(QMainWindow):
             self.home.refresh()
             self.home.notify("Không mở được dự án — đã gỡ khỏi danh sách")
 
+    def maybe_recover(self):
+        p = gk_safe.pending_recovery()
+        if not p:
+            return
+        r = QMessageBox.question(self, "Khôi phục dự án?",
+                                 "Lần trước ứng dụng bị đóng đột ngột. Có bản tự lưu của dự án bạn đang làm.\n\nKhôi phục nó?",
+                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if r == QMessageBox.Yes:
+            self.editor.pause()
+            if self.editor.load_path(p):
+                gk_recent.remove(p)
+                self.stack.setCurrentIndex(2)
+                self.editor.log("Đã khôi phục bản tự lưu. Nhấn Ctrl+S để lưu thành tệp .gkproj.")
+        gk_safe.discard_recovery()
+
     def go_home(self):
         self.editor.pause()
         self.stack.setCurrentIndex(1)
 
 
 if __name__ == "__main__":
+    gk_debug.install_hooks()
+    gk_safe.begin()
     app = QApplication(sys.argv)
+    app.aboutToQuit.connect(gk_safe.end)
     app.setWindowIcon(QIcon(LOGO))
     theme.init_fonts()
     theme.apply_saved(app)
+    gk_safe.startup_prompt()
     w = Main()
     w.show()
+    w.maybe_recover()
     sys.exit(app.exec())

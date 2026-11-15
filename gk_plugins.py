@@ -7,6 +7,7 @@ Lan dau, moi plugin phai duoc nguoi dung cho phep (nho theo ma bam SHA-256; sua 
 import os, hashlib, importlib.util, importlib.machinery, traceback
 import gk_settings
 import gk_model
+import gk_safe
 
 EVENTS = ("seek", "play", "pause", "layer_added", "layer_removed", "layer_selected", "keys_changed",
           "project_new", "project_loaded", "project_saved", "theme_changed")
@@ -209,6 +210,12 @@ class PluginHost:
     def load_all(self):
         self.unload_all()
         c = self._cfg()
+        if gk_safe.SAFE:
+            for path in self.scan():
+                pid = os.path.splitext(os.path.basename(path))[0]
+                self.items[pid] = dict(path=path, meta={"name": pid}, api=None, state="safe", error="")
+            self.ed.log("SAFE MODE: không nạp plugin nào (%d plugin). Menu Plugin > Thoát Safe Mode để nạp lại." % len(self.items))
+            return
         for path in self.scan():
             pid = os.path.splitext(os.path.basename(path))[0]
             self.items[pid] = dict(path=path, meta={"name": pid}, api=None, state="off", error="")
@@ -222,6 +229,7 @@ class PluginHost:
 
     def _load(self, pid):
         it = self.items[pid]
+        gk_safe.mark_loading(pid)
         try:
             loader = importlib.machinery.SourceFileLoader("gkplugin_" + pid, it["path"])
             spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -236,6 +244,8 @@ class PluginHost:
         except Exception:
             it["state"], it["error"] = "error", traceback.format_exc(limit=3)
             self.ed.log("[%s] Không nạp được:\n%s" % (pid, it["error"]))
+        finally:
+            gk_safe.clear_loading()
 
     def _cleanup(self, api):
         for k in api.eases:
@@ -338,6 +348,11 @@ class PluginHost:
             name = it["meta"].get("name", pid)
             ver = it["meta"].get("version", "")
             label = name + ((" " + str(ver)) if ver else "")
+            if it["state"] == "safe":
+                bad = pid in gk_safe.STATE["culprits"]
+                act(m, ("⚠  %s — nghi gây sập, đã tắt" if bad else "⏸  %s — chưa nạp (Safe Mode)") % label,
+                    lambda: None, enabled=False)
+                continue
             if it["state"] == "on":
                 sub = m.addMenu(label)
                 for text, fn in it["api"].actions:
@@ -355,8 +370,15 @@ class PluginHost:
             else:
                 act(m, "○  %s — bật" % label, lambda p=pid: self.set_disabled(p, False))
         m.addSeparator()
+        if gk_safe.SAFE:
+            act(m, "🛡  Thoát Safe Mode và nạp plugin", self.exit_safe)
         act(m, "↻  Tải lại plugin", self.load_all)
         act(m, "📂  Mở thư mục Plugin", self.open_folder)
+
+    def exit_safe(self):
+        gk_safe.SAFE = False
+        self.load_all()
+        self.ed.update_safe_chip()
 
     def open_folder(self):
         from PySide6.QtCore import QUrl

@@ -59,6 +59,13 @@ FORMS = {n: k for _, items in FORM_GROUPS for n, k in items}                  # 
 FORM_NAMES = [(k, n) for _, items in FORM_GROUPS for n, k in items]           # (dang hinh, ten) cho o chon trong Thuoc tinh
 for _n in list(FORMS)[1:]:
     KINDS[_n] = ("shape", 1, "#7a2bff")
+KINDS["Camera 2D"] = ("camera", 1, "#ff8a3d")      # camera: khung nhin, khong ve ra video
+KINDS["Camera 3D"] = ("camera", 1, "#ff8a3d")
+# anh sang: 2D = phu sang len canvas, 3D = nguon sang that (bong do len san trong che do 3D). extra["lt"] = ray|sun|moon
+LIGHT_TYPES = {"ray": ("Tia", "#ffffff"), "sun": ("Sun", "#ffd36b"), "moon": ("Moon", "#bcd2ff")}
+for _lt, (_ln, _lc) in LIGHT_TYPES.items():
+    for _m in ("2D", "3D"):
+        KINDS["%s %s" % (_ln, _m)] = ("light", 1, _lc)
 BODY = {"shape": (.24, .36), "text": (.40, .14), "image": (.36, .24), "video": (.36, .24)}
 # ---- cho plugin (gk_plugins.PluginAPI dang ky vao day)
 CUSTOM_EASE = {}   # khoa -> ham(u) tra tien do
@@ -330,6 +337,12 @@ class Layer:
         return bool(self.mesh.get("on"))
 
     def _key_channels(self):
+        if self.kind == "light":
+            return (["pos0", "pos1", "pos2", "rot0", "rot1", "rot2", "scl0", "op"] if self.extra.get("mode") == "3d"
+                    else ["pos0", "pos1", "rot2", "scl0", "op"])
+        if self.kind == "camera":       # camera chi co cac kenh co nghia
+            return (["pos0", "pos1", "pos2", "rot0", "rot1", "rot2", "scl0"] if self.extra.get("cam") == "3d"
+                    else ["pos0", "pos1", "rot2", "scl0"])
         return PKEYS + ["op"] + (self.mesh_channels() if self.mesh_active() else [])
 
     def add_keys(self, t):

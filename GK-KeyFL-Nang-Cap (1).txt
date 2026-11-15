@@ -1,0 +1,318 @@
+GK KeyFL - DANH SÁCH NÂNG CẤP TỔNG HỢP
+GrayKazu - Sự đơn giản tạo nên sáng tạo
+==================================================
+CHÚ THÍCH:  [x] đã làm   [~] làm một phần   [ ] chưa làm
+Cập nhật: 14/11/2026
+==================================================
+
+PHASE 1 - CỐT LÕI PHẢI CÓ TRƯỚC
+
+[x] 1. LƯỚI MÉO ẢNH - MESH WARP
+- Phủ lên vật thể 1 cái lưới co giãn có keyframe
+- Khi kéo ảnh sẽ móp theo
+- Kéo điểm nào ảnh móp theo điểm đó
+
+[x] 2. KÉO THẢ THOẢI MÁI HƠN
+    => LÀM MỘT PHẦN: Panel dock kéo thả, tách thành cửa sổ rời được; có lưu / xoá bố cục (Workspace). Chưa kéo thả được mọi mục.
+- Tất cả cửa sổ + mục đều có thể kéo thả tùy thích
+- Không bị khóa vị trí
+
+[x] 3. KEYFRAME MƯỢT HƠN + BIỂU ĐỒ XỊN HƠN
+    => LÀM MỘT PHẦN: Đã có Graph editor, Bezier, ease in/out/back/bounce/elastic/cyclic/noise; plugin thêm được kiểu nội suy mới. Chưa kiểm tra mục “fix keyframe giật”.
+- Thêm graph editor, đường cong Bezier, ease in/out
+- Fix keyframe cũ đang bị giật
+- Thêm tính năng mới cho keyframe
+
+[100%] 4. THÊM NHIỀU HÌNH DẠNG HƠN - ÍT NHẤT 50 CÁI TRONG ADD
+    => LÀM MỘT PHẦN: Mới có Hình vuông; plugin Extras thêm Hình tròn và Thanh tiến trình. Chưa đạt 50 hình.
+- Tròn, vuông, tam giác, ngôi sao, trái tim, mũi tên, khung thoại...
+
+[50/50] 5. CLIPPER EDITOR CHO VIDEO 2D
+    => LÀM MỘT PHẦN: Có Vector Editor (cắt vùng ảnh thành lớp mới) và video xem trước khung qua ffmpeg. Chưa có chỉnh / cắt thuộc tính video như mô tả.
+- Cho phép xem trước video
+- Chỉnh nhẹ, cắt thuộc tính video khác, cắt, khoanh vùng v.v
+
+[~] 6. AUTO-SAVE + VERSION
+    => LÀM MỘT PHẦN: Mới có Hoàn tác / Làm lại (Ctrl+Z / Ctrl+Y, 60 bước, trong phiên làm việc). Chưa có auto-save 5 giây và lịch sử version.
+- Tự lưu mỗi 5 giây
+- Có lịch sử version, làm sai quay lại bản 10 phút trước
+- Mất điện, sập máy không mất project
+
+[x] 7. DEBUG MOD
+    => LÀM MỘT PHẦN: Có CPU/RAM ở thanh trạng thái (cần psutil), Console ghi log, hộp Kiểm tra hệ thống. Chưa có FPS thật và chế độ Debug riêng.
+- Hiện FPS, RAM, log lỗi
+- Để tự fix lỗi nhanh
+
+[x] 8. SAFE MODE
+    => LÀM MỘT PHẦN: Plugin chưa được cho phép / bị lỗi sẽ không nạp, lỗi plugin được bắt và ghi vào Console, tắt / bật plugin được. Chưa có chế độ Safe Mode riêng.
+- Sập plugin thì vô Safe Mode tắt plugin lỗi
+- Không mất project
+
+PHASE 2 - LÊN 3D THẬT
+
+[x] 9. THÊM MỤC CHUYỂN 3D
+- Ấn nút icon 3D, canvas trực tiếp bước sang không gian 3D
+- Phẳng sẽ thành Cube 3D đàng hoàng
+- Điều khiển: A trái, S xuống, D phải, W lên, Q bay, E xuống, F zoom
+
+[ ] 10. CAMERA CẢ 2D VÀ 3D
+- Khi add camera sẽ có 1 khung có thể thêm keyframe
+- 2D thì pan/zoom, 3D thì di chuyển 3 chiều
+
+[ ] 11. LIGHT - ÁNH SÁNG CẢ 2D VÀ 3D
+- Tia, Sun, Moon
+- 2D là ánh sáng phủ, 3D là nguồn sáng thật có bóng đổ
+
+[ ] 12. MATERIAL CHO CẢ 2D VÀ 3D
+- Chất liệu: nhựa, kim loại, kính, vải...
+
+[ ] 13. VOLUME 3D + SIMULATOR NƯỚC VÀ VOLUME
+- Thêm volume cho không gian 3D
+- Thêm simulator cho nước và volume
+
+[ ] 14. CONTROLLER CHO CUBE 2-3D
+- Controller riêng cho cube 2D và 3D
+
+[ ] 15. MANAGER CHO VẬT THỂ 3D IMPORT
+- Gần giống FBX của Unity
+- Import vô là có manager để chỉnh
+
+[ ] 16. RIG CHO NHÂN VẬT IMPORT FILE .GKUBUNIRT
+- Rig cho nhân vật import
+
+PHASE 3 - CHUYÊN NGHIỆP + AI
+
+[~] 17. FPS 15-240 VÀ KHUNG HÌNH TÙY CHỈNH
+    => LÀM MỘT PHẦN: Có tuỳ chọn FPS và tỉ lệ khung 16:9, 9:16, 1:1, 4:5. Chưa có 15-240 FPS, X/Y tuỳ chỉnh, đơn vị, khổ giấy, độ phân giải.
+- Cho phép 15-240 FPS
+- Khung hình tùy chỉnh (X)(Y)
+- Đơn vị: PX, INCH, CM, M
+- Khổ: A4, A3, A2, A1
+- Độ phân giải: 480P > 8K
+
+[ ] 18. THIẾT KẾ LẠI UI CHUYÊN NGHIỆP HƠN
+- Thay bố trí kì lạ hiện tại
+- UI sạch, minimal, đúng slogan: Sự đơn giản tạo nên sáng tạo
+
+[~] 19. THÊM 3 MỤC SETTING
+    => LÀM MỘT PHẦN: Có hộp Setting / Tuỳ chọn. Chưa tách thành Proj Setting / Graphic Setting / Setting.
+- Proj Setting
+- Graphic Setting
+- Setting
+
+[ ] 20. TẤT CẢ NÚT ĐỀU CÓ ICON SVG
+- Mỗi nút 1 icon SVG, không để nút chữ trơ trọi
+
+[ ] 21. ẢNH MINH HỌA VÀ HƯỚNG DẪN
+- Thêm ảnh minh họa + hướng dẫn để người mới vô là biết xài
+
+[ ] 22. REALTIME - REALTIME PREVIEW
+- Edit tới đâu thấy tới đó, không cần render chờ
+
+[ ] 23. CANVAS CHO BACKGROUND
+- Làm background xịn xò và đơn giản gấp đôi Alight Motion
+
+[ ] 24. FONT + HIỆU ỨNG + CODE API + ADD-ON CHO TEXT
+- Text có font, hiệu ứng, code API, add-on riêng
+- Tất cả thuộc tính đều phải có add-in
+- Ví dụ: thêm vật lí cho cube thì phải có add-in vật lí
+
+[ ] 25. MOTION TRACKING
+- Chọn 1 vật thể trong video, tự bám theo vật đó dù vật đó di chuyển
+
+[ ] 26. AUDIO WAVEFORM + BEAT SYNC
+- Hiện sóng nhạc lên timeline
+- Tự bắt beat, cắt video khớp nhạc tự động
+
+[ ] 27. EXPORT PRESET
+- 1 nút ra đủ khổ: TikTok 9:16, YouTube 16:9, Shorts, Reels, 4K, 8K...
+
+[ ] 28. GK KeyFL ASSET STORE - WEB KHÔNG PHẢI APP
+- Để trên web graykazu, không nhét vô app cho nặng
+- Cho đăng template, plugin, LUT, material...
+
+[~] 29. CMD NÂNG CẤP API NHIỀU HƠN
+    => LÀM MỘT PHẦN: Ô Lệnh có lệnh cơ bản (play, pause, seek, add, del, ratio, theme, save, load), plugin thêm được lệnh riêng. Chưa có gợi ý bằng //, chưa hiểu lệnh tiếng Việt.
+- Command box nâng cấp, gõ // là gợi ý lệnh
+- Gõ lệnh tiếng Việt là tự làm: tạo cube đỏ xoay 3 vòng
+- API mạnh hơn cho plugin
+
+[ ] 30. MULTI-CAM
+- Quay 2-3 góc cùng lúc, edit là chuyển góc như đạo diễn truyền hình
+
+[ ] 31. NESTING / PRE-COMP
+- Gộp nhiều layer thành 1 cụm, đem cụm đó đi xoay, đi hiệu ứng
+- Giống After Effects nhưng đơn giản hơn
+
+[ ] 32. COLOR GRADING + LUT
+- Bánh xe màu, kéo 1 cái là video từ quê thành điện ảnh
+- Tự tạo LUT rồi bán trên Asset Store
+
+[ ] 33. AUDIO TO TEXT
+- Dùng AI để tự nghe audio -> tự viết sub
+- Tự dịch 4 tiếng: VI / EN / TH / RU
+- Giống web graykazu
+
+[ ] 34. UPSCALE + KHỬ NHIỄU + THÊM CHI TIẾT
+- Video 480p mờ -> upscale lên 4K
+- Khử nhiễu, khử nhiều, vẽ thêm chi tiết cho nét
+- AI Enhance
+
+[ ] 35. AI SLOW MOTION - FRAME INTERPOLATION
+- Video 30fps tự chèn thêm frame thành 120fps
+- Quay chậm mượt như quay bằng máy xịn
+
+[~] 36. AI ROTOSCOPE / TÁCH NGƯỜI TỰ ĐỘNG
+    => LÀM MỘT PHẦN: Có Tách nền (Matte) và Vector Cutout cho ảnh. Chưa có AI tự tách người trong video.
+- Chọn người trong video, tự tách người ra khỏi nền
+- Không cần vẽ tay từng frame
+- Kết hợp với Vector Cutout
+
+[ ] 37. AI INPAINTING - XÓA VẬT THỂ
+- Khoanh vùng là tự lấp lại, xóa người lạ, xóa cột điện
+- Không thấy dấu vết
+
+[ ] 38. AI BACKGROUND MUSIC
+- Gõ: nhạc buồn, piano, 1 phút -> AI tự sáng tác nhạc khớp video
+- Khỏi lo bản quyền
+
+[ ] 39. SMART CUT - CẮT KHOẢNG LẶNG
+- Video nói chuyện có khoảng lặng, ừm à -> tự cắt hết
+- Chỉ giữ lại đoạn nói
+
+[ ] 40. PROXY EDITING
+- Máy yếu tự tạo bản video mờ để edit cho mượt
+- Lúc export mới lấy bản gốc 8K
+
+[ ] 41. COLLAB ONLINE
+- 2 người cùng edit 1 project 1 lúc, giống Google Docs
+
+[ ] 42. BATCH EXPORT
+- Có 10 video, ấn 1 nút là render 10 cái 1 lúc
+
+[ ] 43. OFFLINE MODE + PORTABLE
+- Không cần mạng vẫn xài được
+- Copy folder là mang đi máy khác xài, không cần cài đặt
+
+[ ] 44. TIMELINE COMMENT
+- Comment trực tiếp lên timeline: chỗ này 0:05 cắt ngắn lại
+- Giống Figma comment, làm nhóm khỏi cần chat Zalo
+
+[ ] 45. VOICE CHANGER + TEXT TO SPEECH
+- Gõ chữ là AI đọc thành giọng
+- Đổi giọng người nói thành giọng khác
+
+[~] 46. THƯ VIỆN TEMPLATE CỦA CỘNG ĐỒNG
+    => LÀM MỘT PHẦN: Có 5 mẫu dự án dựng sẵn ở trang chủ (Trống, Tiêu đề Pop-in, Lower third, Logo reveal, Trình chiếu 3 cảnh). Chưa có cộng đồng đăng / tải mẫu.
+- Cho người dùng đăng template lên, người khác tải về xài
+- Giống CapCut template nhưng free 100%
+
+[ ] 47. CHẾ ĐỘ SIÊU NHẸ
+- Máy yếu vẫn chạy được
+- Chỉnh độ phân giải preview thấp xuống, render xong mới lên 8K
+
+[ ] 48. Err_GK KeyFL - HỘP BÁO LỖI GIỐNG UNITY OUT OF MEMORY
+- Khi bị tràn RAM / tràn VRAM / out of memory thì hiện hộp Err_GK KeyFL
+- Giống hộp báo lỗi của Unity khi bị out memory, không phải crash ngang
+- Hiện rõ: RAM đang dùng bao nhiêu / tổng bao nhiêu, VRAM, project nào đang nặng
+- Hiện nút: [Vào Safe Mode] [Bật Proxy Editing] [Clear Cache] [Lưu khẩn cấp] [Đóng project]
+- Có mã lỗi riêng: Err_GK_001 = tràn RAM, Err_GK_002 = tràn VRAM, Err_GK_003 = plugin lỗi
+- Không làm mất project, lưu tạm bản Auto-save trước khi hiện lỗi
+- Có nút Copy Log để gửi cho dev fix
+
+[ ] 49. CHỤP + QUAY EDITOR VÀ OUTPUT
+- Chụp Editor: Cmd > get cap
+- Chụp Output: Cmd > get cap on
+- Quay Editor: Cmd > get invideo
+- Quay Output: Cmd > get invideo on
+- Hoặc phím tắt: Ctrl + U / I / O / P
+  + Ctrl + U = chụp Editor
+  + Ctrl + I = chụp Output
+  + Ctrl + O = quay Editor
+  + Ctrl + P = quay Output
+- Hoặc File > Export > PNG / Video (nếu dùng điện thoại)
+- GIF = Video: xuất GIF cũng là xuất video, chọn định dạng GIF là xong
+
+[~] 50. EDITOR CONFIG KEY - CHỈNH SỬA PHÍM TẮT
+    => LÀM MỘT PHẦN: Có phím tắt cố định (Space, Delete, Ctrl+Z/Y/C/V/D/S/O, K, Alt+←/→, Home/End, Q/W/E/R). Chưa cho người dùng tự tạo / sửa phím tắt.
+- Cho tự tạo, tự sửa phím tắt riêng
+- Ví dụ: ấn Q là cắt, ấn W là thêm keyframe
+- Ai quen tay nào thì đặt tay đó, không bị ép theo CapCut
+
+[x] 51. THEME ADD-ON - API PLUGIN PACKAGE
+    => ĐÃ LÀM: Theme làm qua plugin API (add_theme), có sẵn theme Dracula trong extras_pack.py; menu Theme; panel dock kéo co giãn được.
+- Theme là dạng Add-on, cài qua Api Plugin Package
+- Cho đổi màu UI: dark / light / hồng / tím...
+- Kéo panel to nhỏ tùy thích, studio của ai màu của người đó
+
+[ ] 52. THÙNG RÁC
+- Xóa nhầm layer, xóa nhầm video là vô thùng rác lấy lại được
+- Cmd > sudo delete + Y = xóa tạm vào thùng rác
+- Cmd > ex.zip*to asset/model = giải nén / khôi phục từ thùng rác ra asset/model
+- Không mất luôn như trước
+
+[ ] 53. LOCK - KHÓA VẬT THỂ
+- Lock (cube, layer, camera, light... v.v)
+- Khóa rồi thì không kéo, không xóa, không sửa nhầm được
+- Mở khóa mới sửa được
+
+[ ] 54. FPS AUTO - HIỆN FPS THẬT KHI RUN KEYFRAME
+- Khi run keyframe, góc trái trên sẽ hiện FPS thật màu trắng
+- Cam khi gần giới hạn, đỏ khi tụt và cảnh báo
+- Có thể tắt trong Setting
+- Máy yếu tự giảm FPS preview cho mượt, không bị giật
+
+[x] 55. LƯU PRESET RIÊNG - ĐÃ CÓ
+    => ĐÃ LÀM: Đã có sẵn từ trước (theo GrayKazu).
+- Đã có rồi, không cần thêm lại
+- Chỉnh màu đẹp, hiệu ứng đẹp là lưu thành preset của mình
+- Lần sau ấn 1 cái là áp vô video khác luôn
+Thêm SVG import edit ter (khi import ảnh,video)
+thêm VFX cho 2 và 3 D
+==================================================
+ĐÃ LÀM NGOÀI DANH SÁCH (14/11/2026)
+
+[x] Hợp nhất bản Qt5 (tính năng) vào bản Qt6 / PySide6 (giao diện mới)
+[x] Hệ thống Plugin (gk_plugins.py) + plugin mẫu Extras, menu Plugin, sự kiện và lệnh cho plugin
+[x] Menu Tool: nhân đôi lớp, đặt lại biến đổi, thêm / xoá key, key trước / sau, kiểu nội suy, lặp key, tỉ lệ khung hình
+[x] Trang chủ: dự án gần đây kèm ảnh xem trước, tìm kiếm, sắp xếp, đổi tên / xoá / hiện trong thư mục
+[x] Bắt đầu từ mẫu dự án (5 mẫu)
+[x] Tài khoản, Kiểm tra cập nhật, Kiểm tra hệ thống, Thông tin GK KeyFL
+[x] Sửa phím tắt không ăn (chạy được dù đang bấm vào panel nào) + thêm Delete và các phím mới
+[x] Hoàn tác / Làm lại (Ctrl+Z / Ctrl+Y)
+[x] Sao chép / Dán lớp (Ctrl+C / Ctrl+V), nhân đôi lớp giữ được ảnh trong bộ nhớ và video
+[x] Vá lỗi tương thích PySide6 (wheelEvent, setsize)
+[x] README.md cho dự án
+
+==================================================
+TỔNG KẾT: 2 mục đã làm · 13 mục làm một phần · 40 mục chưa làm (tổng 55 mục)
+Việc kế tiếp đề xuất: Auto-save + version (6), Thùng rác (52), Khóa vật thể (53), Phím tắt tự chỉnh (50), Hộp báo lỗi Err_GK (48)
+Làm theo thứ tự: Cốt lõi -> 3D -> AI -> Polish
+GrayKazu - toge studio
+
+1. Hệ thống Biến dạng & Chuyển động (Warp & Mesh)
+
+• 56. Lưới méo ảnh (Mesh Warp 2D): Phủ lưới điểm co giãn lên ảnh/video, hỗ trợ gắn keyframe cho từng điểm neo để tạo hiệu ứng nhún nhảy theo nhịp nhạc TikTok.
+• 57. Trình méo W-R (Warp-Bend & Squash-Stretch): Công cụ biến dạng tổng thể cho hình khối (như Cube), giúp vật thể quẹo sang một bên (uốn cong/nghiêng) hoặc nhún nén xuống theo quy luật vật lý.
+• 58. Mesh lưới giác (Polygon / Triangulated Mesh): Lưới tam giác tự do phủ bám sát theo hình dáng vật thể (như lá cờ, mái tóc, khuôn mặt) để làm hiệu ứng bay phấp phới hoặc nhún méo cục bộ.
+
+2. Bộ công cụ Vẽ & Biểu cảm Nhân vật (OC & Rigging)
+
+• 59. Bộ vẽ QI Plansh: Trình vẽ tích hợp sẵn chuyên phục vụ vẽ nhân vật OC ngay trong app (bao gồm làm mượt nét vẽ Stabilizer, khóa kênh trong suốt Alpha Lock, Clipping Mask và bảng màu riêng).
+• 60. Planhsions (Hiệu ứng chuyển tiếp/làm mờ hạt): Thay vì làm mờ thông thường, tính năng này tạo độ mờ viền mềm hoặc mờ dạng hạt nhiễu (Dither/Noise) lan tỏa từ trong ra ngoài hoặc từ ngoài vào trong.
+• 61. Trình Face (Face Rigging & Mesh Projection): Cho phép lấy khuôn mặt đã vẽ từ QI Plansh dán trực tiếp lên bề mặt lưới (Mesh) của vật thể 2D/3D, uốn cong theo vật thể và lắp keyframe điều khiển biểu cảm (chớp mắt, cử động miệng) bình thường.
+• 62. Head Tracking (Bám theo chuyển động đầu): Tự động theo dõi vị trí và góc nghiêng đầu của nhân vật trong video để tự sinh keyframe cho lớp Face hoặc phụ kiện bám theo.
+
+3. Hệ thống Hiệu ứng & Kiến trúc Mở rộng
+
+• 63. VFX Editor (2D & 3D): Trình quản lý hiệu ứng hình ảnh dạng chuỗi (Effect Stack) áp dụng cho cả không gian 2D lẫn 3D.
+• 64. Hỗ trợ đa nền tảng & Tự động hóa AI (Android + MCP): Mở rộng GK KeyFL lên Android, tận dụng định dạng .gkproj siêu nhẹ (cấu trúc tương tự MIDI) để AI có thể tự đọc/sinh ra toàn bộ dự án hoàn chỉnh hoặc điều khiển trực tiếp qua giao thức MCP (Model Context Protocol).
+• Vai trò thực tế: Bình thường, mọi vật thể đều xoay và phóng to từ tâm giữa. Khi người dùng dời Điểm neo sang mép trái của một hình chữ nhật, vật thể đó lập tức biến thành một cánh cửa mở ra đóng vào bản lề, hoặc một kim đồng hồ, hoặc khớp tay/chân nhân vật OC.
+• Gợi ý mở rộng đi kèm:
+	• Bắt dính điểm neo (Anchor Snapping): Cho phép giữ phím tắt (như Ctrl hoặc Alt) khi kéo điểm neo để tự động hít chuẩn xác vào 4 góc, trung điểm 4 cạnh, hoặc tâm giữa của vật thể mà không cần căn mắt thủ công.
+	• Chế độ giữ nguyên vị trí hình ảnh (Keep Position): Khi dời điểm neo sang chỗ mới, tọa độ hiển thị của vật thể trên Canvas không bị nhảy lệch đi.
+• Vai trò thực tế: Thay vì chỉ xoay cứng nhắc quanh điểm neo, Điểm cong cho phép giữ cố định một đầu (như gốc cây, chân tường, hoặc gốc tóc) và kéo đầu kia uốn cong quẹo sang hai bên một cách mềm mại.
+• Gợi ý mở rộng đi kèm:
+	• Kết hợp trực tiếp với Rigbody Tar: Khi vật thể đang gắn add-on vật lý (Rigbody Tar) bị va chạm hoặc rơi tự do, bạn có thể cho phép lực quán tính tự động tác động lên Điểm cong này. Nhờ đó, một thanh kiếm, cái cây hay mái tóc nhân vật vừa rơi/di chuyển theo vật lý vừa tự động uốn cong mềm dẻo ở phần ngọn.
+	• Khóa chiều dài (Preserve Length): Khi kéo điểm cong làm đầu kia quẹo sang một bên, tổng chiều dài của vật thể vẫn được giữ nguyên (không bị kéo dài biến dạng vô lý).
+gk
