@@ -3,13 +3,14 @@ import os, json, time, copy
 from PySide6.QtCore import Qt, QTimer, QByteArray, Signal
 from PySide6.QtGui import QPixmap, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QLabel, QPushButton, QMenu, QStatusBar,
-                             QProgressBar, QFileDialog, QColorDialog, QInputDialog, QTabWidget, QApplication)
+                             QProgressBar, QFileDialog, QColorDialog, QInputDialog, QTabWidget, QApplication, QSizePolicy)
 import gk_theme as theme
 import gk_settings
 import gk_prefs as prefs
 import gk_model
 import gk_panels
-from gk_model import Layer, KINDS, PKEYS, TOTAL
+import gk_model
+from gk_model import Layer, KINDS, PKEYS, FORMS
 from gk_timeline import LTimeline, LayerClip, TimelinePanel, GraphPanel
 from gk_panels import styled, make_dock, LogoTile, Avatar, StagePanel, LayerPanel, Inspector, ConsolePanel
 from gk_project import ProjectPanel
@@ -23,6 +24,8 @@ import gk_recent
 import gk_dialogs
 import gk_templates
 from gk_bezier import BezierDialog
+import gk_trash
+from gk_trash_ui import TrashPanel
 
 DEFAULT_WS = "Mặc định"
 
@@ -34,7 +37,12 @@ class EditorPage(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.Widget)           # nhung vao QStackedWidget nhung van co dock
         self.setDockNestingEnabled(True)
+        self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks |
+                            QMainWindow.GroupedDragging)       # keo ca nhom tab, long dock, khong bi khoa vi tri
         self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)
+        for c, a in ((Qt.TopLeftCorner, Qt.LeftDockWidgetArea), (Qt.TopRightCorner, Qt.RightDockWidgetArea),
+                     (Qt.BottomLeftCorner, Qt.BottomDockWidgetArea), (Qt.BottomRightCorner, Qt.BottomDockWidgetArea)):
+            self.setCorner(c, a)
         self.playing, self.t, self.sel = False, 0.0, None
         self._ticking = False
         self.audio = AudioEngine()
@@ -43,6 +51,7 @@ class EditorPage(QMainWindow):
         self.plugins = PluginHost(self)
         self._undo, self._redo, self._clipboard = [], [], None
         self._last_key, self._last_snap, self._last_change = None, None, 0.0
+        self.trash = gk_trash.Trash()
         self._undo_timer = QTimer(self)
         self._undo_timer.setInterval(250)
         self._undo_timer.timeout.connect(self._undo_poll)
@@ -52,12 +61,16 @@ class EditorPage(QMainWindow):
         self.panel = StagePanel(self)
         self.stage = self.panel.stage
         self.stage.picked.connect(lambda L: self.select_layer(L))
-        self.setCentralWidget(self.panel)
+        self.stage.mesh_picked.connect(lambda i: self.graph.select_channel("mwx%d" % i))
+        hole = QWidget()                      # canvas cung la dock (keo / tach / xep tab nhu moi panel khac)
+        hole.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)      # khong chiem cho: cac dock lap day cua so
+        self.setCentralWidget(hole)
 
         self.lp = LayerPanel()
         self.llist = self.lp.llist
         self.llist.picked.connect(lambda L: self.select_layer(L))
         self.llist.toggled.connect(self.toggle_eye)
+        self.llist.reordered.connect(self.reorder_layer)
         self.lp.up.clicked.connect(lambda: self.move_layer(1))
         self.lp.down.clicked.connect(lambda: self.move_layer(-1))
         self.lp.rm.clicked.connect(self.delete_layer)
@@ -74,14 +87,21 @@ class EditorPage(QMainWindow):
         self.insp.vector_clicked.connect(self.open_vector)
         self.insp.key_nav.connect(self.key_nav)
         self.insp.ease_chosen.connect(self.on_ease)
+        self.insp.ease_all.connect(self.on_ease_all)
         self.insp.loop_chosen.connect(self.on_loop)
+        self.insp.shape_changed.connect(self.on_shape)
+        self.insp.mesh_changed.connect(self.on_mesh)
+        self.insp.mesh_reset.connect(self.on_mesh_reset)
+        self.insp.mesh_keys.connect(self.on_mesh_keys)
 
         self.tl = LTimeline()
         self.tl.seek.connect(self.seek)
+        self.tl.clips_changed.connect(self.on_clips_changed)
         self.tl.sc.selectionChanged.connect(self.on_clip_sel)
         self.tl.key_picked.connect(self.seek)
         self.tl.keys_edited.connect(self._keys_changed)
         self.tlp = TimelinePanel(self.tl)
+        self.tl.refreshed.connect(self._time_labels)
         self.tlp.key_add.connect(self.add_key)
         self.tlp.key_del.connect(self.del_key)
         self.tlp.key_prev.connect(lambda: self.key_nav(-1))
@@ -98,21 +118,27 @@ class EditorPage(QMainWindow):
         self.console = ConsolePanel()
         self.console.command.connect(self.run_cmd)
 
+        self.trashp = TrashPanel(self.trash)
+        self.trashp.restore_requested.connect(self.restore_from_trash)
+        self.trashp.purge_requested.connect(lambda it: (self.trash.pop(it), self.trashp.refresh()))
+
         self.panel.prev.clicked.connect(lambda: self.seek(0))
-        self.panel.nxt.clicked.connect(lambda: self.seek(TOTAL))
+        self.panel.nxt.clicked.connect(lambda: self.seek(gk_model.DURATION))
         self.panel.play.clicked.connect(self.toggle_play)
         self.setup_shortcuts()
 
         # ---------------- dock
         self.d_vector, self.vecwin = make_vector_dock(self, self.on_vector_cut)
+        self.d_canvas = make_dock(self, "Canvas", self.panel, "dock_canvas")
         self.d_layers = make_dock(self, "Lớp", self.lp, "dock_layers")
         self.d_inspector = make_dock(self, "Thuộc tính", self.insp, "dock_inspector")
         self.d_project = make_dock(self, "Assets", self.project, "dock_project")
         self.d_console = make_dock(self, "Lệnh", self.console, "dock_console")
         self.d_timeline = make_dock(self, "Timeline", self.tlp, "dock_timeline")
         self.d_graph = make_dock(self, "Đồ thị key frame", self.graph, "dock_graph")
-        self.docks = [self.d_layers, self.d_inspector, self.d_project, self.d_timeline, self.d_graph, self.d_console,
-                     self.d_vector]
+        self.d_trash = make_dock(self, "Thùng rác", self.trashp, "dock_trash")
+        self.docks = [self.d_canvas, self.d_layers, self.d_inspector, self.d_project, self.d_timeline, self.d_graph, self.d_console,
+                     self.d_vector, self.d_trash]
         self.d_layers.widget().setMinimumWidth(200)
         self.d_inspector.widget().setMinimumWidth(260)
 
@@ -150,10 +176,13 @@ class EditorPage(QMainWindow):
         table = [
             ("Space", self.toggle_play, False),
             ("Ctrl+,", self.open_settings, False),
+            ("Ctrl+0", self.stage.fit_view, False),
             ("Q", lambda: self.panel.set_mode("select"), False),
             ("W", lambda: self.panel.set_mode("move"), False),
             ("E", lambda: self.panel.set_mode("rotate"), False),
             ("R", lambda: self.panel.set_mode("scale"), False),
+            ("Y", lambda: self.panel.set_mode("skew"), False),
+            ("T", lambda: self.panel.set_mode("mesh"), False),
             ("Delete", self.delete_layer, False),
             ("Ctrl+Z", self.undo, True),
             ("Ctrl+Y", self.redo, True),
@@ -167,7 +196,7 @@ class EditorPage(QMainWindow):
             ("Alt+Left", lambda: self.key_nav(-1), True),
             ("Alt+Right", lambda: self.key_nav(1), True),
             ("Home", lambda: self.seek(0), False),
-            ("End", lambda: self.seek(TOTAL), False),
+            ("End", lambda: self.seek(gk_model.DURATION), False),
             ("Ctrl+S", self.save_project, False),
             ("Ctrl+O", self.load_project, False),
         ]
@@ -294,8 +323,11 @@ class EditorPage(QMainWindow):
         self.act(m, "📋  Dán lớp\tCtrl+V", self.paste_layer, enabled=self._clipboard is not None)
         m.addSeparator()
         self.act(m, "✂  Cắt clip", self.tl.split)
-        self.act(m, "🗑  Xoá clip", self.tl.delete)
+        self.act(m, "🗑  Xoá clip", self.delete_clip_to_trash)
         self.act(m, "🗑  Xoá lớp\tDelete", self.delete_layer)
+        m.addSeparator()
+        self.act(m, "🗑  Thùng rác", lambda: (self.d_trash.setVisible(True), self.d_trash.raise_()),
+                 enabled=not self.trash.is_empty())
         m.addSeparator()
         self.act(m, "✂  Vector Editor (cắt ảnh)…", self.open_vector)
         self.act(m, "◐  Tách nền…", self.open_matte)
@@ -328,7 +360,7 @@ class EditorPage(QMainWindow):
             self.act(sub, n, lambda k=k: self.on_loop(k))
         m.addSeparator()
         self.act(m, "⏮  Về đầu dòng thời gian", lambda: self.seek(0))
-        self.act(m, "⏭  Tới cuối dòng thời gian", lambda: self.seek(TOTAL))
+        self.act(m, "⏭  Tới cuối dòng thời gian", lambda: self.seek(gk_model.DURATION))
         self.act(m, "Tự động key frame", lambda: prefs.put("autokey", not prefs.get("autokey")),
                  checked=prefs.get("autokey"))
         sub = m.addMenu("Tỉ lệ khung hình")
@@ -354,7 +386,7 @@ class EditorPage(QMainWindow):
     def _insert_layer(self, N, clips):
         self.stage.layers.append(N)
         for row, s, du, off in clips:
-            c = self.tl.add_layer_clip(N, row, s, du)
+            c = self.tl.add_layer_clip(N, self.tl.free_row(row, s, du), s, du)
             if off and c is not None:
                 c.src_off = off
         self.make_media(N)
@@ -389,8 +421,7 @@ class EditorPage(QMainWindow):
             delta = self.t - min(c[1] for c in clips)
             moved = []
             for row, s, du, off in clips:
-                s2 = min(max(0.0, s + delta), TOTAL - 0.1)
-                moved.append((row, s2, max(0.1, min(du, TOTAL - s2)), off))
+                moved.append((row, max(0.0, s + delta), du, off))
             clips = moved
         self._insert_layer(N, clips)
         self.log("Đã dán lớp '%s'" % N.name)
@@ -430,8 +461,8 @@ class EditorPage(QMainWindow):
 
     def _undo_poll(self):
         """Cu 250ms so sanh du an voi lan truoc; thay doi lien tuc (keo chuot, go chu) gop thanh 1 buoc hoan tac."""
-        if not self.isVisible() or self._last_snap is None:
-            return
+        if not self.isVisible() or self._last_snap is None or self.playing:
+            return          # dang phat: khong tuan tu hoa ca du an moi 250ms (gay giat)
         if QApplication.mouseButtons() & Qt.LeftButton:
             return          # dang keo chuot: khong chup / so sanh ca du an moi 250ms (gay giat); lam sau khi tha
         key = self._state_key()
@@ -531,6 +562,7 @@ class EditorPage(QMainWindow):
                 continue
             d.setFloating(False)
             self.removeDockWidget(d)
+        self.addDockWidget(Qt.TopDockWidgetArea, self.d_canvas)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.d_layers)
         self.addDockWidget(Qt.RightDockWidgetArea, self.d_inspector)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.d_project)
@@ -555,7 +587,7 @@ class EditorPage(QMainWindow):
             return                                  # se chay lai o showEvent
         self.resizeDocks([self.d_layers, self.d_inspector], [250, 340], Qt.Horizontal)
         self.resizeDocks([self.d_project, self.d_timeline], [380, 980], Qt.Horizontal)
-        self.resizeDocks([self.d_timeline], [280], Qt.Vertical)
+        self.resizeDocks([self.d_canvas, self.d_timeline], [520, 280], Qt.Vertical)
         self._need_size = False
 
     def showEvent(self, e):
@@ -610,7 +642,7 @@ class EditorPage(QMainWindow):
         bg = Layer("Nền", "bg", "#000000")
         bg.timed = False
         self.stage.layers.append(bg)
-        self.new_layer("Hình vuông", start=0, dur=TOTAL)
+        self.new_layer("Hình vuông", start=0, dur=5.0)
         self.seek(0)
         self.plugins.emit("project_new")
         self.undo_reset()
@@ -620,17 +652,21 @@ class EditorPage(QMainWindow):
         self.stage.layers.clear()
         self.sel = self.stage.sel = None
         self.audio.players.clear()
+        self.trash.clear()
+        self.trashp.refresh()
 
     def new_layer(self, kn, path=None, start=None, dur=5.0):
         kind, row, col = KINDS[kn]
         n = sum(1 for x in self.stage.layers if x.kind == kind) + 1
         L = Layer(os.path.basename(path) if path else "%s %d" % (kn, n), kind, col)
         L.path = path
+        if kn in FORMS:
+            L.extra["form"] = FORMS[kn]
         if path and kind == "image":
             L.pix = QPixmap(path)
         self.stage.layers.append(L)
-        s = min(self.t, TOTAL - 2) if start is None else start
-        self.tl.add_layer_clip(L, row, s, min(dur, TOTAL - s))
+        s = self.t if start is None else start
+        self.tl.add_layer_clip(L, self.tl.free_row(row, s, dur), s, dur)     # lop moi vao hang trong, khong chong len nhau
         self.tl.refresh()
         self.select_layer(L)
         self.rebuild_tree()
@@ -641,14 +677,48 @@ class EditorPage(QMainWindow):
         L = self.sel
         if not L or L.kind == "bg":
             return
+        clips = self._clips_of(L)          # giu lai truoc khi xoa, de co the khoi phuc dung timeline
         for c in list(L.clips):
             self.tl.remove_clip(c)
         if getattr(L, "vid", None) is not None:
             self.audio.players.pop(id(L), None)
         self.stage.layers.remove(L)
+        self.trash.push("layer", (L, clips), L.name)
+        self.trashp.refresh()
+        self.tl.refresh()
+        self._time_labels()
         self.plugins.emit("layer_removed", L)
         self.select_layer(None)
         self.rebuild_tree()
+
+    def delete_clip_to_trash(self):
+        """Xoa cac clip dang chon tren timeline, giu lai trong Thung rac de khoi phuc duoc."""
+        any_deleted = False
+        for c in list(self.tl.sc.selectedItems()):
+            if isinstance(c, LayerClip):
+                self.trash.push("clip", (c.layer, c.row, c.start, c.dur, getattr(c, "src_off", 0.0)),
+                                "%s (%.1fs)" % (c.layer.name, c.dur))
+                self.tl.remove_clip(c)
+                any_deleted = True
+        if any_deleted:
+            self.trashp.refresh()
+        self.tl.viewport().update()
+
+    def restore_from_trash(self, item):
+        """Lay lai 1 muc tu Thung rac (lop hoac clip), dung lai dung logic chen vao timeline hien co."""
+        if item.kind == "layer":
+            L, clips = item.payload
+            self._insert_layer(L, clips)
+            self.log("Đã khôi phục '%s' từ thùng rác" % L.name)
+        elif item.kind == "clip":
+            layer, row, start, dur, off = item.payload
+            c = self.tl.add_layer_clip(layer, self.tl.free_row(row, start, dur), start, dur)
+            if off and c is not None:
+                c.src_off = off
+            self.tl.refresh()
+            self.log("Đã khôi phục clip '%s' từ thùng rác" % item.label)
+        self.trash.pop(item)
+        self.trashp.refresh()
 
     def move_layer(self, d):
         L, ls = self.sel, self.stage.layers
@@ -659,6 +729,19 @@ class EditorPage(QMainWindow):
             ls[j - d], ls[j] = ls[j], ls[j - d]
             self.rebuild_tree()
             self.stage.update()
+
+    def reorder_layer(self, L, idx):
+        """Keo tha lop trong danh sach: dua lop L toi vi tri idx (0 = nen, khong di chuyen duoc)."""
+        ls = self.stage.layers
+        if L.kind == "bg" or L not in ls:
+            return
+        idx = max(1, min(len(ls) - 1, idx))
+        if ls.index(L) == idx:
+            return
+        ls.remove(L)
+        ls.insert(idx, L)
+        self.rebuild_tree()
+        self.stage.update()
 
     def rebuild_tree(self):
         self.llist.set_layers(self.stage.layers, self.sel)
@@ -705,6 +788,52 @@ class EditorPage(QMainWindow):
         self.graph.refresh()
         self._bez_sync()
         self.plugins.emit("keys_changed")
+
+    def on_shape(self, form, sides, inner, rnd):
+        L = self.sel
+        if not L or L.kind != "shape":
+            return
+        L.extra.update(form=form, sides=sides, inner=inner, round=rnd)
+        self.stage.update()
+        self.llist.update()
+
+    def on_mesh(self, on, cols, rows):
+        L = self.sel
+        if not L or L.kind in ("bg", "audio"):
+            return
+        if (cols, rows) != (L.mesh["cols"], L.mesh["rows"]):
+            L.mesh_clear()                       # doi do phan giai luoi: diem cu khong con khop
+        was = bool(L.mesh.get("on"))
+        L.mesh = {"on": bool(on), "cols": cols, "rows": rows}
+        if on and not was:
+            self.panel.set_mode("mesh")
+        self._keys_changed()
+
+    def mesh_toggle_key(self, L, idx):
+        """Chuot phai vao 1 diem luoi: them / xoa key (X va Y) cua diem do tai dau phat."""
+        added = L.toggle_keys(["mwx%d" % idx, "mwy%d" % idx], self.t)
+        self._keys_changed()
+        self.log("%s key điểm lưới #%d tại %.2fs" % ("Đã thêm" if added else "Đã xoá", idx, self.t))
+
+    def on_mesh_keys(self, add):
+        L = self.sel
+        if not L or not L.mesh_active():
+            return
+        chans = L.mesh_channels()
+        has = any(abs(k.t - self.t) < 0.05 for ch in chans for k in L.kf.get(ch, []))
+        if add:
+            for ch in chans:
+                L.set(ch, self.t, L.get(ch, self.t), True)
+        elif has:
+            L.toggle_keys(chans, self.t)
+        self._keys_changed()
+
+    def on_mesh_reset(self):
+        L = self.sel
+        if L:
+            L.mesh_clear()
+            self._keys_changed()
+            self.log("Đã đặt lại lưới méo của '%s'" % L.name)
 
     def on_pill(self, key, v):
         if self.sel:
@@ -756,6 +885,12 @@ class EditorPage(QMainWindow):
         if self.sel:
             self.sel.set_ease_at(self.t, e)
             self._keys_changed()
+
+    def on_ease_all(self, e):
+        if self.sel and self.sel.kf:
+            self.sel.set_ease_all(e)
+            self._keys_changed()
+            self.log("Đã làm mượt toàn bộ key của '%s'" % self.sel.name)
 
     def on_loop(self, m):
         if self.sel:
@@ -886,7 +1021,7 @@ class EditorPage(QMainWindow):
                 if (c == "play") != self.playing:
                     self.toggle_play()
             elif c == "seek":
-                self.seek(max(0.0, min(TOTAL, float(a[1]))))
+                self.seek(max(0.0, min(gk_model.total(), float(a[1]))))
             elif c == "add" and a[1] in names:
                 self.new_layer(names[a[1]])
             elif c == "del":
@@ -921,7 +1056,10 @@ class EditorPage(QMainWindow):
             gk_recent.add(f)
             self.plugins.emit("project_saved", f)
             sel, self.stage.sel = self.stage.sel, None      # chup khung canvas lam anh xem truoc
+            zm, pn = self.stage.zoom, self.stage.pan
+            self.stage.zoom, self.stage.pan = 1.0, type(pn)(0, 0)     # chup o zoom 100%
             gk_recent.save_thumb(f, self.stage.grab(self.stage.canvas().toRect()))
+            self.stage.zoom, self.stage.pan = zm, pn
             self.stage.sel = sel
             self.stage.update()
         except Exception as ex:
@@ -988,24 +1126,38 @@ class EditorPage(QMainWindow):
         self.graph.set_time(t)
         self.sync_props()
         self._bez_sync()
-        txt = f"{int(t) // 60:02d}:{t % 60:04.1f} / 00:{TOTAL:04.1f}"
-        self.panel.timelbl.setText(txt)
-        self.tlp.timelbl.setText(txt)
-        self.prog.setValue(int(t / TOTAL * 100))
+        self._time_labels()
         if self.playing and not self._ticking:
             self.audio.sync(self.stage.layers, t, True, force=True)
         self.plugins.emit("seek", t)
+
+    def _time_labels(self):
+        if not hasattr(self, "prog"):
+            return
+        t, D = self.t, gk_model.DURATION
+        txt = f"{int(t) // 60:02d}:{t % 60:04.1f} / {int(D) // 60:02d}:{D % 60:04.1f}"
+        self.panel.timelbl.setText(txt)
+        self.tlp.timelbl.setText(txt)
+        pv = max(0, min(100, int(t / D * 100)))
+        if pv != self.prog.value():
+            self.prog.setValue(pv)
+
+    def on_clips_changed(self):
+        """Clip bi keo / doi do dai / xoa: timeline va nhan thoi gian bam theo noi dung."""
+        self.tl.refresh()
+        self._time_labels()
+        self.stage.update()
 
     def tick(self):
         now = time.monotonic()
         dt = min(0.1, now - self._last)
         self._last = now
         t = self.t + dt
-        if t >= TOTAL:
+        if t >= gk_model.DURATION:
             if prefs.get("loop"):
                 t = 0.0
             else:
-                self.seek(TOTAL)
+                self.seek(gk_model.DURATION)
                 self.toggle_play()
                 return
         self._ticking = True

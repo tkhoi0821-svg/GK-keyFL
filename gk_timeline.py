@@ -10,7 +10,7 @@ import gk_theme as theme
 from gk_theme import T, mk
 from gk_assets import mime_paths
 from gk_panels import ScrubSpin
-from gk_model import TOTAL, TRACK_H, RULER_H, TRACKS, COLORS, CHANNELS, EASES, LOOPS, BEZ, Key, ease_u
+from gk_model import total, fit_duration, MAXT, TRACK_H, RULER_H, TRACKS, COLORS, CHANNELS, EASES, LOOPS, BEZ, Key, ease_u
 
 
 def tc(s):
@@ -36,23 +36,71 @@ class Clip(QGraphicsRectItem):
     def __init__(self, tl, name, row, start, dur):
         super().__init__()
         self.tl, self.name, self.row, self.start, self.dur = tl, name, row, start, dur
-        self.color = QColor(COLORS[TRACKS[row]])
+        self.color = QColor(COLORS[TRACKS[min(row, len(TRACKS) - 1)]])
+        self._rs = None            # dang keo mep clip de doi thoi gian: (mep, start, dur, src_off)
+        self.setAcceptHoverEvents(True)
         self.setFlags(QGraphicsRectItem.ItemIsMovable | QGraphicsRectItem.ItemIsSelectable |
                       QGraphicsRectItem.ItemSendsGeometryChanges)
         self.layout()
 
     def layout(self):
-        self.setRect(0, 0, self.dur * self.tl.pps, TRACK_H - 6)
-        self.setPos(self.start * self.tl.pps, RULER_H + 3 + self.row * TRACK_H)
+        self.setRect(0, 0, self.dur * self.tl.pps, self.tl.th - 6)
+        self.setPos(self.start * self.tl.pps, RULER_H + 3 + self.row * self.tl.th)
 
     def itemChange(self, change, value):
         if change == QGraphicsRectItem.ItemPositionChange:
             x = max(0, round(value.x() / self.tl.pps * 10) / 10)
-            row = max(0, min(len(TRACKS) - 1, round((value.y() - RULER_H - 3) / TRACK_H)))
+            row = max(0, min(self.tl.nrows - 1, round((value.y() - RULER_H - 3) / self.tl.th)))
             self.start, self.row = x, row
             value.setX(x * self.tl.pps)
-            value.setY(RULER_H + 3 + row * TRACK_H)
+            value.setY(RULER_H + 3 + row * self.tl.th)
         return super().itemChange(change, value)
+
+    EDGE = 7       # be rong vung keo mep clip (px)
+
+    def edge_at(self, x):
+        w = self.rect().width()
+        if w < self.EDGE * 3:          # clip qua ngan: chi cho keo mep phai
+            return "R" if x > w - self.EDGE else None
+        return "L" if x < self.EDGE else ("R" if x > w - self.EDGE else None)
+
+    def hoverMoveEvent(self, e):
+        self.setCursor(Qt.SizeHorCursor if self.edge_at(e.pos().x()) else Qt.ArrowCursor)
+        super().hoverMoveEvent(e)
+
+    def mousePressEvent(self, e):
+        edge = self.edge_at(e.pos().x()) if e.button() == Qt.LeftButton else None
+        if edge:
+            self._rs = (edge, self.start, self.dur, getattr(self, "src_off", 0.0))
+            self.setSelected(True)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._rs is None:
+            super().mouseMoveEvent(e)
+            return
+        edge, s0, d0, off0 = self._rs
+        t = max(0.0, min(MAXT, round(self.mapToScene(e.pos()).x() / self.tl.pps * 20) / 20))
+        end = s0 + d0
+        if edge == "R":
+            self.dur = round(max(0.1, t - s0), 3)
+        else:
+            lo = 0.0
+            if hasattr(self, "layer") and self.layer.kind in ("video", "audio"):
+                lo = max(0.0, s0 - off0)           # khong keo lui qua dau tep media
+            ns = min(max(t, lo), end - 0.1)
+            self.start, self.dur = round(ns, 3), round(end - ns, 3)
+            if hasattr(self, "src_off"):
+                self.src_off = round(max(0.0, off0 + (ns - s0)), 3)
+        self.layout()
+        self.tl.clips_changed.emit()
+
+    def mouseReleaseEvent(self, e):
+        self._rs = None
+        super().mouseReleaseEvent(e)
+        self.tl.clips_changed.emit()
 
     def paint(self, p, *_):
         p.setRenderHint(QPainter.Antialiasing)
@@ -70,10 +118,16 @@ class Clip(QGraphicsRectItem):
         if w > 12:
             p.drawText(QRectF(r.left() + 8, r.top(), w, r.height()), Qt.AlignVCenter | Qt.AlignLeft,
                        QFontMetrics(p.font()).elidedText(self.name, Qt.ElideRight, w))
+        p.setPen(QPen(QColor(255, 255, 255, 150), 2))          # tay nam 2 mep: keo de doi thoi gian
+        cy = r.center().y()
+        for x in (r.left() + 3.5, r.right() - 3.5):
+            p.drawLine(QPointF(x, cy - 6), QPointF(x, cy + 6))
 
 
 class Timeline(QGraphicsView):
     seek = Signal(float)
+    refreshed = Signal()          # sau moi lan refresh (chieu dai timeline co the da doi)
+    clips_changed = Signal()      # clip bi keo / doi do dai -> editor tinh lai chieu dai timeline
     key_picked = Signal(float)   # bam / keo 1 key tren clip
     keys_edited = Signal()        # key bi doi thoi gian hoac them moi
     asset_dropped = Signal(str, float)   # tep tu Assets tha vao timeline (duong dan, thoi gian)
@@ -81,11 +135,12 @@ class Timeline(QGraphicsView):
     def __init__(self):
         super().__init__()
         self.pps = 60.0
+        self.th, self.nrows = TRACK_H, len(TRACKS)      # cao 1 hang / so hang: tu gian theo so lop
         self.sc = QGraphicsScene(self)
         self.setScene(self.sc)
         self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.setAcceptDrops(True)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setFrameShape(QFrame.NoFrame)
         self.clips = []
         self.t = 0.0
@@ -99,61 +154,81 @@ class Timeline(QGraphicsView):
         return c
 
     def refresh(self):
-        self.sc.setSceneRect(0, 0, TOTAL * self.pps + 200, RULER_H + len(TRACKS) * TRACK_H)
+        fit_duration(self.clips)        # timeline bam theo clip cuoi, khong co dinh 30s
+        used = max((c.row for c in self.clips), default=-1) + 1
+        self.nrows = max(len(TRACKS), used + 1)            # luon con 1 hang trong de tha clip vao
+        avail = self.viewport().height() - RULER_H
+        self.th = max(32, min(TRACK_H, avail // self.nrows)) if avail > 0 else TRACK_H
+        self.sc.setSceneRect(0, 0, total() * self.pps + 200, RULER_H + self.nrows * self.th)
         for c in self.clips:
             c.layout()
         self.set_time(self.t)
         self.viewport().update()
+        self.refreshed.emit()
 
     def set_time(self, t):
         self.t = t
         self.viewport().update()
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.refresh()
+
+    def free_row(self, pref, start, dur, ignore=None):
+        """Hang dau tien (tu pref tro xuong) khong co clip nao chong len khoang [start, start+dur]."""
+        r = max(0, pref)
+        while True:
+            if not any(c is not ignore and c.row == r and c.start < start + dur - 1e-6 and start < c.start + c.dur - 1e-6
+                       for c in self.clips):
+                return r
+            r += 1
+
     def drawBackground(self, p, rect):
         p.fillRect(rect, QColor(T["bg0"]))
-        for i in range(len(TRACKS)):
-            y = RULER_H + i * TRACK_H
-            p.fillRect(QRectF(rect.left(), y, rect.width(), TRACK_H), QColor(T["track_a"] if i % 2 == 0 else T["track_b"]))
+        for i in range(self.nrows):
+            y = RULER_H + i * self.th
+            p.fillRect(QRectF(rect.left(), y, rect.width(), self.th), QColor(T["track_a"] if i % 2 == 0 else T["track_b"]))
             p.setPen(QPen(QColor(T["line"]), 1))
-            p.drawLine(int(rect.left()), y + TRACK_H, int(rect.right()), y + TRACK_H)
-        p.fillRect(QRectF(rect.left(), 0, rect.width(), RULER_H), QColor(T["bg2"]))
+            p.drawLine(int(rect.left()), y + self.th, int(rect.right()), y + self.th)
+
+    def drawForeground(self, p, rect):
+        y0 = rect.top()                                    # thuoc do luon dinh o dau khung nhin
+        p.fillRect(QRectF(rect.left(), y0, rect.width(), RULER_H), QColor(T["bg2"]))
         p.setPen(QPen(QColor(T["line"]), 1))
-        p.drawLine(int(rect.left()), RULER_H, int(rect.right()), RULER_H)
+        p.drawLine(int(rect.left()), int(y0 + RULER_H), int(rect.right()), int(y0 + RULER_H))
         lab = 1 if self.pps >= 90 else (2 if self.pps >= 45 else 5)
         sub = 0.5 if self.pps >= 120 else 1.0
         p.setFont(mk(theme.FONT_BODY, 10))
         s0 = max(0, int(rect.left() / self.pps) - 1)
-        s1 = int(min(TOTAL, rect.right() / self.pps + 1))
+        s1 = int(min(total(), rect.right() / self.pps + 1))
         n = int(s0 / sub)
         while n * sub <= s1:
             s = n * sub
             x = int(s * self.pps)
             major = abs(s - round(s)) < 1e-6 and int(round(s)) % lab == 0
             p.setPen(QColor(T["text2"] if major else T["text3"]))
-            p.drawLine(x, RULER_H - (12 if major else 6), x, RULER_H)
+            p.drawLine(x, int(y0 + RULER_H - (12 if major else 6)), x, int(y0 + RULER_H))
             if major:
-                p.drawText(x + 4, 14, tc(s))
+                p.drawText(x + 4, int(y0 + 14), tc(s))
             n += 1
-
-    def drawForeground(self, p, rect):
         x = self.t * self.pps
         p.setRenderHint(QPainter.Antialiasing)
         col = QColor(T["playhead"])
         p.setPen(QPen(col, 2))
-        p.drawLine(QPointF(x, RULER_H - 2), QPointF(x, self.sc.height()))
+        p.drawLine(QPointF(x, y0 + RULER_H - 2), QPointF(x, self.sc.height()))
         p.setPen(Qt.NoPen)
         p.setBrush(col)
-        p.drawPolygon(QPolygonF([QPointF(x - 7, 3), QPointF(x + 7, 3), QPointF(x + 7, 12), QPointF(x, RULER_H - 2),
-                                 QPointF(x - 7, 12)]))
+        p.drawPolygon(QPolygonF([QPointF(x - 7, y0 + 3), QPointF(x + 7, y0 + 3), QPointF(x + 7, y0 + 12),
+                                 QPointF(x, y0 + RULER_H - 2), QPointF(x - 7, y0 + 12)]))
 
     def mousePressEvent(self, e):
         if e.y() < RULER_H:
-            self.seek.emit(max(0, min(TOTAL, self.mapToScene(e.pos()).x() / self.pps)))
+            self.seek.emit(max(0, min(total(), self.mapToScene(e.pos()).x() / self.pps)))
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
         if e.buttons() & Qt.LeftButton and e.y() < RULER_H and not self.sc.mouseGrabberItem():
-            self.seek.emit(max(0, min(TOTAL, self.mapToScene(e.pos()).x() / self.pps)))
+            self.seek.emit(max(0, min(total(), self.mapToScene(e.pos()).x() / self.pps)))
         super().mouseMoveEvent(e)
 
     def dragEnterEvent(self, e):
@@ -164,7 +239,7 @@ class Timeline(QGraphicsView):
         e.acceptProposedAction()
 
     def dropEvent(self, e):
-        t = max(0.0, min(TOTAL - 1, self.mapToScene(e.pos()).x() / self.pps))
+        t = max(0.0, self.mapToScene(e.pos()).x() / self.pps)
         for p in mime_paths(e.mimeData()):
             self.asset_dropped.emit(p, t)
         e.acceptProposedAction()
@@ -189,6 +264,7 @@ class LayerClip(Clip):
     def __init__(self, tl, L, row, start, dur):
         super().__init__(tl, L.name, row, start, dur)
         self.layer = L
+        self.color = QColor(COLORS[{"text": "Text", "video": "Video", "audio": "Audio"}.get(L.kind, "Overlay")])
         self._kt = None
         self.src_off = 0.0        # giay bo qua o dau tep media (sau khi cat)
 
@@ -225,7 +301,7 @@ class LayerClip(Clip):
 
     def mouseMoveEvent(self, e):
         if self._kt is not None:
-            nt = max(0.0, min(TOTAL, round(self.start + e.pos().x() / self.tl.pps, 2)))
+            nt = max(0.0, min(MAXT, round(self.start + e.pos().x() / self.tl.pps, 2)))
             if abs(nt - self._kt) >= 0.01:
                 self.layer.move_keys(self._kt, nt)
                 self._kt = nt
@@ -240,7 +316,7 @@ class LayerClip(Clip):
 
     def mouseDoubleClickEvent(self, e):
         if self.in_band(e) and self.key_at(e.pos().x()) is None:
-            t = max(0.0, min(TOTAL, round(self.start + e.pos().x() / self.tl.pps, 2)))
+            t = max(0.0, min(MAXT, round(self.start + e.pos().x() / self.tl.pps, 2)))
             self.layer.add_keys(t)
             self.tl.key_picked.emit(t)
             self.tl.keys_edited.emit()
@@ -279,35 +355,43 @@ class LTimeline(Timeline):
         for c in list(self.sc.selectedItems()):
             if isinstance(c, LayerClip):
                 self.remove_clip(c)
-        self.viewport().update()
+        self.refresh()
+        self.clips_changed.emit()
 
 
 class TrackHeaders(QWidget):
-    """Cot ten track ben trai timeline (khop voi thuoc do + hang track)."""
+    """Cot ten track ben trai timeline (khop voi thuoc do + hang track; so hang tu tang theo so lop)."""
 
-    def __init__(self):
+    def __init__(self, tl):
         super().__init__()
+        self.tl = tl
         self.setFixedWidth(84)
         theme.bus.changed.connect(self.update)
+        tl.refreshed.connect(self.update)
+        tl.verticalScrollBar().valueChanged.connect(lambda _: (self.update(), tl.viewport().update()))
 
     def paintEvent(self, _):
-        p = QPainter(self)
+        tl, p = self.tl, QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), QColor(T["bg1"]))
+        off = tl.verticalScrollBar().value()
+        p.setFont(mk(theme.FONT_BODY, 12, QFont.DemiBold))
+        for i in range(tl.nrows):
+            y = RULER_H + i * tl.th - off
+            if y + tl.th < RULER_H or y > self.height():
+                continue
+            cl = next((c for c in tl.clips if c.row == i), None)
+            p.setPen(Qt.NoPen)
+            p.setBrush(cl.color if cl else QColor(T["bg3"]))
+            p.drawRoundedRect(QRectF(10, y + 10, 6, tl.th - 20), 3, 3)
+            p.setPen(QColor(T["text"] if cl else T["text3"]))
+            p.drawText(QRectF(24, y, self.width() - 28, tl.th), Qt.AlignVCenter | Qt.AlignLeft, "Track %d" % (i + 1))
+            p.setPen(QPen(QColor(T["line"]), 1))
+            p.drawLine(0, y + tl.th, self.width(), y + tl.th)
         p.fillRect(QRectF(0, 0, self.width(), RULER_H), QColor(T["bg2"]))
         p.setPen(QPen(QColor(T["line"]), 1))
         p.drawLine(0, RULER_H, self.width(), RULER_H)
         p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
-        p.setFont(mk(theme.FONT_BODY, 12, QFont.DemiBold))
-        for i, n in enumerate(TRACKS):
-            y = RULER_H + i * TRACK_H
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(COLORS[n]))
-            p.drawRoundedRect(QRectF(10, y + 12, 6, TRACK_H - 24), 3, 3)
-            p.setPen(QColor(T["text"]))
-            p.drawText(QRectF(24, y, self.width() - 28, TRACK_H), Qt.AlignVCenter | Qt.AlignLeft, n)
-            p.setPen(QPen(QColor(T["line"]), 1))
-            p.drawLine(0, y + TRACK_H, self.width(), y + TRACK_H)
 
 
 class TimelinePanel(QWidget):
@@ -348,7 +432,7 @@ class TimelinePanel(QWidget):
             b.clicked.connect(lambda _=False, sg=sig: sg.emit())
             h.addWidget(b)
         h.addSpacing(10)
-        self.timelbl = QLabel("00:00.0 / 00:30.0")
+        self.timelbl = QLabel("00:00.0 / 00:05.0")
         self.timelbl.setObjectName("Timecode")
         h.addWidget(self.timelbl)
         h.addStretch()
@@ -362,7 +446,7 @@ class TimelinePanel(QWidget):
         v.addWidget(bar)
         row = QHBoxLayout()
         row.setSpacing(0)
-        row.addWidget(TrackHeaders())
+        row.addWidget(TrackHeaders(tl))
         row.addWidget(tl, 1)
         v.addLayout(row, 1)
         self.setMinimumHeight(RULER_H + len(TRACKS) * TRACK_H + 48)
@@ -421,7 +505,7 @@ class GraphPlot(QWidget):
         super().__init__()
         self.layer, self.key, self.t = None, "pos0", 0.0
         self.sel, self.hot, self.d = [], None, None
-        self.vt0, self.vt1 = 0.0, TOTAL          # khoang thoi gian dang xem
+        self.vt0, self.vt1 = 0.0, total()          # khoang thoi gian dang xem
         self.vy = None                           # (thap, cao) khi nguoi dung zoom doc; None = tu dong
         self.frozen = None                       # khoa truc doc trong luc keo
         self.mode = "value"                       # "value" = do thi gia tri · "speed" = do thi toc do
@@ -509,26 +593,26 @@ class GraphPlot(QWidget):
         return self.xt(pos.x()), yr[0] + (r.bottom() - pos.y()) / r.height() * (yr[1] - yr[0])
 
     def clampt(self, t):
-        return max(0.0, min(TOTAL, t))
+        return max(0.0, min(MAXT, t))
 
     def fit(self, keys=None):
         ks = keys if keys is not None else self.keys()
         if ks:
             a, b = min(k.t for k in ks), max(k.t for k in ks)
             pad = max(b - a, 1.0) * 0.15 + 0.2
-            self.vt0, self.vt1 = max(-0.5, a - pad), min(TOTAL + 0.5, b + pad)
+            self.vt0, self.vt1 = max(-0.5, a - pad), min(MAXT, b + pad)
         else:
-            self.vt0, self.vt1 = 0.0, TOTAL
+            self.vt0, self.vt1 = 0.0, total()
         self.vy = None
         self.update()
 
     def zoom_t(self, factor, anchor):
         span = self.vt1 - self.vt0
-        new = max(0.2, min(TOTAL + 1.0, span * factor))
+        new = max(0.2, min(max(total(), self.vt1) + 1.0, span * factor))
         ratio = new / span
         self.vt0 = anchor - (anchor - self.vt0) * ratio
         self.vt1 = self.vt0 + new
-        shift = max(0.0, -0.5 - self.vt0) - max(0.0, self.vt1 - (TOTAL + 0.5))
+        shift = max(0.0, -0.5 - self.vt0) - max(0.0, self.vt1 - (max(total(), self.vt1) + 0.5))
         self.vt0, self.vt1 = self.vt0 + shift, self.vt1 + shift
         self.update()
 
@@ -1066,11 +1150,28 @@ class GraphPanel(QWidget):
         h.setSpacing(6)
         h.addWidget(QLabel("Kênh"))
         self.combo = QComboBox()
-        for k, n in CHANNELS:
-            self.combo.addItem(n, k)
+        self._combo_sig = None
+        self._rebuild_combo(None)
         self.combo.setMinimumWidth(120)
         self.combo.setToolTip("● = kênh đang có key frame")
         h.addWidget(self.combo)
+        self.pt_combo = QComboBox()                      # chi hien khi chon kenh "Luoi meo": chon tung diem (💡 = da di chuyen / co key)
+        self.pt_combo.setMinimumWidth(110)
+        self.pt_combo.setMaxVisibleItems(18)
+        self.pt_combo.setToolTip("Chọn điểm lưới.  💡 = điểm đã di chuyển hoặc có key frame")
+        self.ax_x, self.ax_y = QPushButton("X"), QPushButton("Y")
+        axg = QButtonGroup(self)
+        for b in (self.ax_x, self.ax_y):
+            b.setObjectName("SmallBtn")
+            b.setCheckable(True)
+            b.setFixedWidth(28)
+            axg.addButton(b)
+        self.ax_x.setChecked(True)
+        self._pt_sig = None
+        h.addWidget(self.pt_combo)
+        h.addWidget(self.ax_x)
+        h.addWidget(self.ax_y)
+        self.pt_combo.hide(); self.ax_x.hide(); self.ax_y.hide()
         self.v_btn, self.s_btn = QPushButton("Giá trị"), QPushButton("Tốc độ")
         grp = QButtonGroup(self)
         for b, tip in ((self.v_btn, "Đồ thị giá trị theo thời gian"),
@@ -1099,7 +1200,7 @@ class GraphPanel(QWidget):
         lt.setObjectName("Sub")
         lv.setObjectName("Sub")
         self.f_t = ScrubSpin("", 0.02)
-        self.f_t.setRange(0, TOTAL)
+        self.f_t.setRange(0, MAXT)
         self.f_t.setDecimals(2)
         self.f_t.setSuffix(" s")
         self.f_v = ScrubSpin("", 0.1)
@@ -1195,6 +1296,9 @@ class GraphPanel(QWidget):
         v.addLayout(body, 1)
 
         self.combo.currentIndexChanged.connect(self._channel)
+        self.pt_combo.currentIndexChanged.connect(self._apply_mesh)
+        self.ax_x.clicked.connect(self._apply_mesh)
+        self.ax_y.clicked.connect(self._apply_mesh)
         self.gal.itemClicked.connect(lambda it: self._apply(it.data(Qt.UserRole)))
         self.prev.clicked.connect(lambda: self._step(-1))
         self.nxt.clicked.connect(lambda: self._step(1))
@@ -1224,10 +1328,101 @@ class GraphPanel(QWidget):
         self.f_v.setEnabled(m == "value" and pl.selk is not None)
         pl.update()
 
+    def _channel_list(self, L):
+        """Kenh co dinh + 1 muc gop "Luoi meo" (moi diem luoi nam trong danh sach chi tiet, khong liet ke tung diem)."""
+        out = list(CHANNELS)
+        if L is not None and L.mesh_active():
+            out.append(("mesh", "Lưới méo (%d×%d)" % (L.mesh["cols"] + 1, L.mesh["rows"] + 1)))
+        return out
+
+    def _rebuild_combo(self, L):
+        sig = (L.mesh["cols"], L.mesh["rows"]) if (L is not None and L.mesh_active()) else None
+        if sig == self._combo_sig and self.combo.count():
+            return
+        self._combo_sig = sig
+        pk = self.plot.key if hasattr(self, "plot") else "pos0"
+        cur = "mesh" if pk.startswith("mw") else pk
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        for k, n in self._channel_list(L):
+            self.combo.addItem(n, k)
+        i = self.combo.findData(cur)
+        self.combo.setCurrentIndex(i if i >= 0 else 0)
+        self.combo.blockSignals(False)
+        if i < 0 and hasattr(self, "plot"):
+            self.plot.set_key(self.combo.itemData(0))
+        self._rebuild_points(L)
+        self._show_points()
+
+    def _rebuild_points(self, L):
+        """Danh sach diem luoi: 💡 neu diem da bi keo lech hoac co key frame."""
+        if not hasattr(self, "pt_combo"):
+            return
+        sig = (L.mesh["cols"], L.mesh["rows"]) if (L is not None and L.mesh_active()) else None
+        n = 0 if sig is None else (sig[0] + 1) * (sig[1] + 1)
+        if sig != self._pt_sig or self.pt_combo.count() != n:
+            self._pt_sig = sig
+            cur = self.pt_combo.currentData()
+            self.pt_combo.blockSignals(True)
+            self.pt_combo.clear()
+            for idx in range(n):
+                self.pt_combo.addItem("", idx)
+            if cur is not None and 0 <= cur < n:
+                self.pt_combo.setCurrentIndex(cur)
+            self.pt_combo.blockSignals(False)
+        for idx in range(n):
+            c = sig[0] + 1
+            r_, c_ = divmod(idx, c)
+            used = any(L.kf.get("mw%s%d" % (a, idx)) or abs(L.base.get("mw%s%d" % (a, idx), 0.0)) > 0.01 for a in "xy")
+            self.pt_combo.setItemText(idx, ("💡 " if used else "     ") + "Điểm (%d,%d)" % (c_ + 1, r_ + 1))
+
+    def _show_points(self):
+        if not hasattr(self, "pt_combo"):
+            return
+        on = self.combo.currentData() == "mesh"
+        for w in (self.pt_combo, self.ax_x, self.ax_y):
+            w.setVisible(on)
+
+    def _mesh_key(self):
+        idx = self.pt_combo.currentData()
+        return "mw%s%d" % ("x" if self.ax_x.isChecked() else "y", idx if idx is not None else 0)
+
+    def _apply_mesh(self, *_):
+        if self.combo.currentData() == "mesh":
+            self.plot.set_key(self._mesh_key())
+            self._sync()
+
+    def select_channel(self, key):
+        """Chuyen do thi sang 1 kenh; kenh luoi (mwx12...) -> muc "Luoi meo" + dung diem do."""
+        if key.startswith("mw"):
+            i = self.combo.findData("mesh")
+            if i < 0:
+                return
+            idx, ax = int(key[3:]), key[2]
+            for w in (self.pt_combo, self.ax_x, self.ax_y):
+                w.blockSignals(True)
+            self.pt_combo.setCurrentIndex(idx)
+            (self.ax_x if ax == "x" else self.ax_y).setChecked(True)
+            for w in (self.pt_combo, self.ax_x, self.ax_y):
+                w.blockSignals(False)
+            if self.combo.currentIndex() != i:
+                self.combo.setCurrentIndex(i)          # -> _channel -> _apply_mesh
+            else:
+                self._apply_mesh()
+            return
+        i = self.combo.findData(key)
+        if i >= 0 and i != self.combo.currentIndex():
+            self.combo.setCurrentIndex(i)
+
     def _mark_channels(self):
         L = self.plot.layer
-        for i, (k, n) in enumerate(CHANNELS):
-            self.combo.setItemText(i, ("● " if (L and L.kf.get(k)) else "    ") + n)
+        self._rebuild_combo(L)
+        self._rebuild_points(L)
+        for i in range(self.combo.count()):
+            k = self.combo.itemData(i)
+            has = bool(L and (any(L.kf.get(c) for c in L.mesh_channels()) if k == "mesh" else L.kf.get(k)))
+            n = self.combo.itemText(i).lstrip("● ").strip()
+            self.combo.setItemText(i, ("● " if has else "    ") + n)
 
     def _fields(self):
         k = self.plot.selk
@@ -1262,6 +1457,10 @@ class GraphPanel(QWidget):
         self.edited.emit()
 
     def _channel(self, _):
+        self._show_points()
+        if self.combo.currentData() == "mesh":
+            self._apply_mesh()
+            return
         self.plot.set_key(self.combo.currentData())
         self._sync()
 
@@ -1283,7 +1482,7 @@ class GraphPanel(QWidget):
             names = [e for e, _ in EASES]
             self.gal.setCurrentRow(names.index(k.e) if k.e in names else 0)
             n = len(self.plot.sel)
-            self.name_lbl.setText(dict(EASES)[k.e] + ("  ×%d" % round(k.n) if k.e in ("cyclic", "noise") else "") +
+            self.name_lbl.setText(dict(EASES).get(k.e, k.e) + ("  ×%d" % round(k.n) if k.e in ("cyclic", "noise") else "") +
                                   ("   ·  %d key được chọn" % n if n > 1 else ""))
         self.gal.blockSignals(False)
 
@@ -1352,12 +1551,18 @@ class GraphPanel(QWidget):
         if L is self.plot.layer:          # cung lop: giu nguyen vung chon va muc zoom
             self.refresh()
             return
+        self._rebuild_combo(L)
         self.plot.set_layer(L)
         # chon san kenh dau tien dang co key de khong phai mo ca danh sach
         if L is not None and not L.kf.get(self.plot.key):
-            for i, (k, _) in enumerate(CHANNELS):
-                if L.kf.get(k):
-                    self.combo.setCurrentIndex(i)      # -> _channel -> set_key + fit
+            for i in range(self.combo.count()):
+                k_ = self.combo.itemData(i)
+                if (any(L.kf.get(c) for c in L.mesh_channels()) if k_ == "mesh" else L.kf.get(k_)):
+                    if k_ == "mesh":
+                        first = next(c for c in L.mesh_channels() if L.kf.get(c))
+                        self.select_channel(first)      # nhay thang toi diem luoi dau tien co key
+                    else:
+                        self.combo.setCurrentIndex(i)      # -> _channel -> set_key + fit
                     break
         self._sync()
 

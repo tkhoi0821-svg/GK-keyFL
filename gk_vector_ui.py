@@ -165,7 +165,7 @@ class VectorCanvas(QWidget):
 
     def mousePressEvent(self, e):
         self.setFocus()
-        pos = QPointF(e.pos())
+        pos = e.position()         # Qt6: dung .position() thay cho .pos() (da deprecated)
         if e.button() == Qt.MiddleButton or (e.button() == Qt.LeftButton and e.modifiers() & Qt.AltModifier):
             self.drag = dict(m="pan", last=pos)
             self.setCursor(Qt.ClosedHandCursor)
@@ -241,7 +241,7 @@ class VectorCanvas(QWidget):
             self.update()
 
     def mouseMoveEvent(self, e):
-        d, pos = self.drag, QPointF(e.pos())
+        d, pos = self.drag, e.position()
         if d is None:
             return
         m = d["m"]
@@ -322,7 +322,7 @@ class VectorCanvas(QWidget):
 
     def wheelEvent(self, e):
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
-        anchor = QPointF(e.pos())
+        anchor = e.position()          # Qt6: QWheelEvent khong con .pos(), dung .position() (da la QPointF)
         img_before = self.to_img(anchor)
         self.zoom = max(0.05, min(8.0, self.zoom * f))
         new_scr = self.to_scr(*img_before)
